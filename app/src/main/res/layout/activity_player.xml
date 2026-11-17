@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reproductor en PAISAJE — especificación del estilo del player (§1, landscape),
+  con el ajuste pedido por el usuario: los servidores van PEGADOS al borde de
+  arriba y la tira de canales PEGADA al borde de abajo, sin ningún hueco.
+
+    · Root RelativeLayout, fondo #000000.
+    · PlayerView a pantalla completa: use_controller=false, resize_mode=fit.
+    · ProgressBar centrado (el "cargando"; se oculta a los 8 s o al STATE_READY).
+    · Overlay vertical transparente:
+        - ARRIBA (borde):   headerLayout con "Servidores:", su HorizontalScrollView
+                            y el botón de refrescar de 28dp.
+        - CENTRO:           controles horizontales, inicialmente gone.
+        - ABAJO (borde):    tira de canales de 135dp con fondo #80000000.
+
+  Los toques que caen en la cabecera, en los controles o en la tira de canales
+  NO ocultan nada (por eso esos tres bloques son clickable); el resto de la
+  pantalla llega al PlayerView y alterna la visibilidad del overlay.
+
+  Ids: el código espera estos nombres.
+    controls              -> el overlay entero (controlsOverlay)
+    filaServidores        -> la cabecera de servidores (headerLayout de la spec)
+    centerControls        -> los controles del centro
+    tiraCanalesPlayer / scrollCanalesPlayer / contenededorCanalesPlayer -> tira de abajo
+  En paisaje se incluye PiP en el grupo de controles; la barra seek no se usa.
+-->
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    android:keepScreenOn="true">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/playerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        app:resize_mode="fill"
+        app:show_buffering="never"
+        app:use_controller="false" />
+
+    <!-- Reserva invisible: reproductor web cuando no hay stream nativo. -->
+    <WebView
+        android:id="@+id/webPlayable"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:visibility="gone" />
+
+    <!-- Cargando, centrado. -->
+    <ProgressBar
+        android:id="@+id/cargandoPlayer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_centerInParent="true"
+        android:indeterminate="true"
+        android:indeterminateTint="@android:color/white"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/controls"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!-- ARRIBA, pegada al borde: servidores + refrescar. -->
+        <LinearLayout
+            android:id="@+id/filaServidores"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clickable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingEnd="8dp"
+                android:text="@string/player_servidores"
+                android:textColor="@android:color/white"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <HorizontalScrollView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/contenedorServidores"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+
+            </HorizontalScrollView>
+
+            <ImageButton
+                android:id="@+id/btnRefresh"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_refresh"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_refresh" />
+
+        </LinearLayout>
+
+        <!-- Hueco transparente: el toque pasa al vídeo y alterna los controles. -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- CENTRO: controles horizontales (inicialmente gone). -->
+        <LinearLayout
+            android:id="@+id/centerControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:clickable="true"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <ImageButton
+                android:id="@+id/btnRewind"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_rewind"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_rewind" />
+
+            <ImageButton
+                android:id="@+id/btnPlayPause"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_play_pause"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_play" />
+
+            <ImageButton
+                android:id="@+id/btnForward"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_forward"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_forward" />
+
+            <ImageButton
+                android:id="@+id/btnVolume"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_volume"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_volume" />
+
+            <ImageButton
+                android:id="@+id/btnPip"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_pip"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_pip" />
+
+            <ImageButton
+                android:id="@+id/btnPantalla"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_pantalla"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_salir_pantalla" />
+
+        </LinearLayout>
+
+        <!-- Hueco transparente: el toque pasa al vídeo y alterna los controles. -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- Barra de progreso: se arrastra hasta donde uno quiera (como en
+             Netflix). En paisaje va pegada al borde de abajo, encima de la
+             tira de canales. clickable a proposito: el arrastre no debe
+             colarse al PlayerView y alternar los controles.
+             Empieza en gone y así se queda en los canales en directo:
+             aplicarVisibilidadExtra() la muestra solo cuando el contenido
+             admite busqueda, y v7.34.1 lo comprueba con isCurrentMediaItemLive
+             porque los directos con ventana de DVR también publican duración.
+             Al ser gone no ocupa sitio: el reproductor de canales queda igual. -->
+        <LinearLayout
+            android:id="@+id/filaProgreso"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#99012A33"
+            android:clickable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="6dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvTiempoActual"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="46dp"
+                android:text="0:00"
+                android:textColor="@color/pelis_text"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekBar"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="1000"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:progressDrawable="@drawable/seekbar_progress"
+                android:splitTrack="false"
+                android:thumb="@drawable/seekbar_thumb" />
+
+            <TextView
+                android:id="@+id/tvTiempoTotal"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:minWidth="46dp"
+                android:text="--:--"
+                android:textColor="@color/pelis_text"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <!-- ABAJO, pegada al borde: tira de canales para zapear. -->
+        <LinearLayout
+            android:id="@+id/tiraCanalesPlayer"
+            android:layout_width="match_parent"
+            android:layout_height="135dp"
+            android:background="#80000000"
+            android:clickable="true"
+            android:orientation="vertical"
+            android:padding="9dp"
+            android:visibility="visible">
+
+            <HorizontalScrollView
+                android:id="@+id/scrollCanalesPlayer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/contenedorCanalesPlayer"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+
+            </HorizontalScrollView>
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</RelativeLayout>
