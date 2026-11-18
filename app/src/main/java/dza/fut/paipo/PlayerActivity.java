@@ -353,6 +353,8 @@ public class PlayerActivity extends AppCompatActivity {
             }
         }
         instanciaActiva = this;
+        // v7.39.1 — nace limpio: generación nueva y sin memoria del canal que hubiera.
+        invalidarCanalAnterior("onCreate");
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (getSupportActionBar() != null) getSupportActionBar().hide();
@@ -606,6 +608,7 @@ public class PlayerActivity extends AppCompatActivity {
                 String[] ra = null;
                 String err = null;
                 final long t0N = System.currentTimeMillis();
+                final int miGeneracion = generacionDelCanal.actual();   // v7.39.1
                 // v7.38.9 — la API arranca en paralelo, ANTES de resolver nada y sin
                 // que el canal la espere. Así (a) no retrasa el arranque y (b) sus
                 // opciones existen también cuando resolverVivo falla, que es justo
@@ -698,6 +701,14 @@ public class PlayerActivity extends AppCompatActivity {
                 final String er = err;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
+                        // v7.39.1 — si el usuario ya abrió otro canal, este remate es del
+                        // viejo: se tira. Sin esto, el fallo del glbr del canal anterior
+                        // abría el plan B (o el sitio) del canal anterior ENCIMA del nuevo,
+                        // que es literalmente «clico un canal y se queda en otro».
+                        if (!sigueVigente(miGeneracion)) {
+                            log("⏹ resolución del canal anterior descartada (ya hay otro)");
+                            return;
+                        }
                         if (rr == null) {
                             // v7.23: sin estas dos lineas el bloque se queda ABIERTO y
                             // VACIO, que es lo que le paso al usuario: cuatro toques y
@@ -1685,6 +1696,11 @@ public class PlayerActivity extends AppCompatActivity {
             return;
         }
         setIntent(intent);
+        // v7.39.1 — «clico un canal y se queda en otro»: esta Activity es singleTask, así
+        // que aquí venimos a REUTILIZAR la instancia del canal anterior. Antes de tocar
+        // nada hay que matar todo lo asíncrono del canal viejo (carrera, glasbi, WebView,
+        // temporizadores) y vaciar la memoria de servidores; si no, al volver pisa al nuevo.
+        invalidarCanalAnterior("onNewIntent");
         leerOpcionesDeIntent(intent);   // v3.2.66: chips del canal recien llegado
         String tituloNuevo = intent.getStringExtra("canal_titulo");
         if (tituloNuevo != null) { tituloCanalActual = tituloNuevo; pintarTituloPlayer(); }
@@ -1708,6 +1724,11 @@ public class PlayerActivity extends AppCompatActivity {
             if (cab != null) streamCabeceras = cab;
             urlIframeInicial = null;
             errorRefreshCount = 0;
+            // v7.39.1 — el stream que sonaba era del canal viejo: se para antes de cargar
+            // el nuevo (si no, se oye un canal y se ve otro durante el cambio).
+            if (player != null) {
+                try { player.stop(); player.clearMediaItems(); } catch (Throwable ignored) { }
+            }
             resolverStreamDirecto(streamDirecto, streamCookies, streamReferer, streamOrigin);
         } else if (nuevoIframe != null && !nuevoIframe.isEmpty()) {
             // Si vuelve a llegar la MISMA url (doble clic en el canal) mientras
@@ -1720,6 +1741,11 @@ public class PlayerActivity extends AppCompatActivity {
             urlIframeInicial = nuevoIframe;
             streamDirecto = null;
             errorRefreshCount = 0;
+            dramaLiveEnJuego = null;      // v7.39.1: el glbr del canal viejo no vale aquí
+            canalCurado = null;
+            if (player != null) {
+                try { player.stop(); player.clearMediaItems(); } catch (Throwable ignored) { }
+            }
             resolverStreamEnSegundoPlano();
         }
     }
@@ -1814,6 +1840,8 @@ public class PlayerActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        // v7.39.1 — sale de la pantalla: nada de lo que haya en vuelo puede entregar.
+        generacionDelCanal.abrirCanal();
         if (pipReceiver != null) {
             try { unregisterReceiver(pipReceiver); } catch (Exception ignored) { }
             pipReceiver = null;
@@ -2513,6 +2541,83 @@ public class PlayerActivity extends AppCompatActivity {
     private volatile boolean carreraEnMarcha = false;
 
     /**
+     * v7.39.1 — <b>EL GUARDIÁN: la generación del canal que se está viendo.</b>
+     *
+     * <p><b>El defecto que arregla, tal como lo describió el usuario:</b> «a veces clic en
+     * un canal y se queda en otro». Esta Activity es {@code singleTask}, así que el segundo
+     * canal que se toca llega a {@link #onNewIntent} <em>sobre la misma instancia</em>. La
+     * instancia vieja tenía, vivo, todo esto del canal anterior:</p>
+     *
+     * <ul>
+     *   <li>las cuatro hebras de la carrera de opciones, sondeando el canal viejo;</li>
+     *   <li>el POST de glasbi/glbr en {@code executorService} (2-13 s);</li>
+     *   <li>el WebView oculto buscando el manifiesto;</li>
+     *   <li>el vigilante de 15/30 s del embed;</li>
+     *   <li>la memoria del canal viejo ({@code servidoresProbados}) — que además hacía que
+     *       las opciones del canal NUEVO se saltaran por «ya probadas».</li>
+     * </ul>
+     *
+     * <p>Cuando llegaban, remataban al canal nuevo: su ganadora se le aplicaba encima, o su
+     * «no hay nada» llamaba a {@code avisarSinStream} y mandaba al plan B del canal viejo.
+     * Se ve como que el canal elegido no abre y el otro sigue.</p>
+     *
+     * <p>Ahora cada apertura de canal sube la generación, y <b>todo</b> lo asíncrono guarda
+     * el número con el que nació: si al volver ya no es el actual, se descarta en silencio.
+     * Es el mismo patrón que un token de sesión, aplicado al reproductor.</p>
+     */
+    private final GeneracionDelCanal generacionDelCanal = new GeneracionDelCanal();
+
+    /**
+     * v7.39.1 — <b>empieza un canal nuevo: se mata TODO lo que quedaba del anterior.</b>
+     *
+     * <p>Sube la generación (lo asíncrono del canal viejo se descarta al volver), vacía la
+     * lista de urls ya lanzadas a la carrera (si no, las del canal nuevo se saltarían por
+     * «ya probadas»), apaga las banderas de imagen y cierra la ventana de cortesía.</p>
+     *
+     * <p>Lo llama {@code onCreate} y {@code onNewIntent}, o sea: cada vez que se abre un
+     * canal, venga de la rejilla, del zapeo, de la tira o de una notificación.</p>
+     */
+    private void invalidarCanalAnterior(String motivo) {
+        int gen = generacionDelCanal.abrirCanal();
+        urlsEnCarrera.clear();
+        carreraEnMarcha = false;
+        imagenConfirmada = false;
+        arranqueDeLaFuenteMs = 0L;
+        if (servidoresProbados != null) servidoresProbados.clear();
+        if (opcionesFallidas != null) opcionesFallidas.clear();
+        opcionesDeLaApi = null;
+        // v7.39.1 — la memoria del CANAL ANTERIOR (sus servidores crudos, su lista cocinada,
+        // su cura) tampoco puede sobrevivir al cambio: el plan B del canal viejo se ofrecía
+        // como si fuera del nuevo, y eso también es «se queda en otro canal».
+        streamUrl = null;
+        streamBackup = null;
+        streamOpcionesJson = null;
+        dramaLiveEnJuego = null;
+        canalCurado = null;
+        curaCiclos = 0;
+        dramaSwapPares = null;
+        urlEnReproduccion = null;
+        sinVideoYaAvisado = false;
+        segundaOportunidadDada = false;
+        peticionesDeVideo = 0;
+        videoDeEmbedAvanza = false;
+        embeddedEnVentana = false;
+        embedEnCurso = null;
+        webViewOcultoYaProbado = false;
+        isResolving = false;
+        errorRefreshCount = 0;
+        urlConRelay = null;
+        // Todo lo que estaba programado para el canal viejo deja de sonar.
+        try { mainHandler.removeCallbacksAndMessages(null); } catch (Throwable ignored) { }
+        log("🧹 canal limpio (generación " + gen + ", " + motivo + ")");
+    }
+
+    /** ¿Sigue siendo esta la generación que manda? Se pregunta en CADA vuelta asíncrona. */
+    private boolean sigueVigente(int generacion) {
+        return generacionDelCanal.vigente(generacion) && !isFinishing() && !carreraCancelada;
+    }
+
+    /**
      * v7.39.0 — <b>¿ya hay imagen de vídeo, o solo un «preparando»?</b>
      *
      * <p>No vale {@code streamReady}: se pone a true al llamar a {@code prepare()}, así
@@ -2549,10 +2654,15 @@ public class PlayerActivity extends AppCompatActivity {
     private void pedirOpcionesEnSegundoPlano(String canalDrama) {
         final String canal = canalDrama;
         try {
+            final int miGeneracion = generacionDelCanal.actual();   // v7.39.1
             executorService.execute(new Runnable() {
                 @Override public void run() {
                     java.util.List<DramaResolucion.Opcion> ops = pedirOpcionesALaApi(canal);
                     if (ops == null || ops.isEmpty()) return;
+                    if (miGeneracion != generacionDelCanal.actual()) {
+                        log("api: respuesta del canal anterior descartada");
+                        return;
+                    }
                     opcionesDeLaApi = ops;
 
                     // v7.38.11 — si el proxy ya nos da una playlist, NO hay por qué
@@ -2572,7 +2682,7 @@ public class PlayerActivity extends AppCompatActivity {
 
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            if (isFinishing() || imagenConfirmada) return;
+                            if (!sigueVigente(miGeneracion) || imagenConfirmada) return;
                             lanzarCarrera("la API respondió");
                         }
                     });
@@ -2625,6 +2735,7 @@ public class PlayerActivity extends AppCompatActivity {
             return;
         }
         carreraEnMarcha = true;
+        final int miGeneracion = generacionDelCanal.actual();   // v7.39.1
         for (DramaResolucion.Opcion c : cands) {
             if (!servidoresProbados.contains(c.url)) servidoresProbados.add(c.url);
         }
@@ -2636,19 +2747,25 @@ public class PlayerActivity extends AppCompatActivity {
                 CarreraDeOpciones.Respuesta g = CarreraDeOpciones.correr(cands,
                         new CarreraDeOpciones.Oyente() {
                             @Override public void ganadora(final CarreraDeOpciones.Respuesta r) {
+                                if (miGeneracion != generacionDelCanal.actual()) {
+                                    log("🏁 ganadora del canal ANTERIOR descartada: " + r.opcion.url);
+                                    return;
+                                }
                                 log("🏁 carrera ganada en " + r.ms + " ms (" + r.motivo + ") -> "
                                         + r.opcion.url);
                                 final CarreraDeOpciones.Respuesta rr = r;
                                 uiDeLaCarrera.post(new Runnable() {
-                                    @Override public void run() { aplicarGanadora(rr); }
+                                    @Override public void run() { aplicarGanadora(rr, miGeneracion); }
                                 });
                             }
 
                             @Override public void descartada(CarreraDeOpciones.Respuesta r) {
+                                if (miGeneracion != generacionDelCanal.actual()) return;
                                 log("🏁 descartada (" + r.motivo + ", " + r.ms + " ms): " + r.opcion.url);
                             }
 
                             @Override public void ninguna(java.util.List<CarreraDeOpciones.Respuesta> intentos) {
+                                if (miGeneracion != generacionDelCanal.actual()) return;
                                 log("🏁 carrera: ninguna responde (" + intentos.size() + " probadas)");
                             }
                         });
@@ -2656,6 +2773,7 @@ public class PlayerActivity extends AppCompatActivity {
                 if (g == null) {
                     uiDeLaCarrera.post(new Runnable() {
                         @Override public void run() {
+                            if (miGeneracion != generacionDelCanal.actual()) return;
                             carreraEnMarcha = false;
                             // Ninguna de la carrera sirve. Ya quedaron marcadas como
                             // probadas al lanzarlas, así que el camino de siempre
@@ -2699,9 +2817,14 @@ public class PlayerActivity extends AppCompatActivity {
      * que el usuario está viendo). Si aún está en negro, se cambia — con una ventana de
      * 1,2 s de cortesía para no cortar un arranque que estaba a punto de cuajar.</p>
      */
-    private void aplicarGanadora(final CarreraDeOpciones.Respuesta r) {
+    private void aplicarGanadora(final CarreraDeOpciones.Respuesta r, int generacion) {
         if (r == null || r.opcion == null) return;
         if (isFinishing() || carreraCancelada) return;
+        // v7.39.1 — si mientras tanto se abrió otro canal, esta ganadora ya no vale.
+        if (!sigueVigente(generacion)) {
+            log("🏁 ganadora tardía ignorada (ya hay otro canal)");
+            return;
+        }
         if (imagenConfirmada) {
             log("🏁 la ganadora llega tarde (ya hay imagen): se ignora");
             return;
@@ -2711,16 +2834,17 @@ public class PlayerActivity extends AppCompatActivity {
         if (espera > 0) {
             log("🏁 ganadora en espera " + espera + " ms (cortesía con el arranque actual)");
             uiDeLaCarrera.postDelayed(new Runnable() {
-                @Override public void run() { aplicarGanadoraYa(r); }
+                @Override public void run() { aplicarGanadoraYa(r, generacion); }
             }, espera);
             return;
         }
-        aplicarGanadoraYa(r);
+        aplicarGanadoraYa(r, generacion);
     }
 
-    private void aplicarGanadoraYa(CarreraDeOpciones.Respuesta r) {
+    private void aplicarGanadoraYa(CarreraDeOpciones.Respuesta r, int generacion) {
         if (r == null || r.opcion == null) return;
         if (isFinishing() || carreraCancelada || imagenConfirmada) return;
+        if (!sigueVigente(generacion)) return;
         log("🎬 la ganadora de la carrera va al reproductor -> " + r.opcion.url);
         urlIframeInicial = null;
         mostrarChipCalidad();
@@ -2965,7 +3089,11 @@ public class PlayerActivity extends AppCompatActivity {
             // v7.37.18: si a los 15 s sigue sin verse nada, se prueba el SIGUIENTE
             // embed del canal en vez de dejar el cuadro negro para siempre.
             final String elQueSePuso = embed;
+            final int miGeneracion = generacionDelCanal.actual();   // v7.39.1
             mainHandler.postDelayed(() -> {
+                // v7.39.1 — el vigilante del embed del canal VIEJO saltaba a los 15 s y
+                // cambiaba el servidor del canal NUEVO. Ahora muere con su generación.
+                if (miGeneracion != generacionDelCanal.actual()) return;
                 if (!embeddedEnVentana || isFinishing()) return;
                 if (videoDeEmbedAvanza) {
                     log("plan B: hay imagen del embed (vídeo confirmado)");
@@ -3009,6 +3137,10 @@ public class PlayerActivity extends AppCompatActivity {
 
     /** A los 30 s: ¿arrancó el embed? Si no, se pasa al siguiente servidor. */
     private void revisarSiElEmbedArranco() {
+        // v7.39.1 — este vigilante corre a los 30 s; si en ese tiempo el usuario abrió otro
+        // canal, el embed que revisa ya no está en la ventana (embeddedEnVentana se limpia
+        // en invalidarCanalAnterior), así que sale solo. Se deja la guarda explícita por
+        // claridad: cambiar de servidor aquí movería el canal NUEVO.
         if (!embeddedEnVentana || isFinishing()) return;
         if (peticionesDeVideo > 0 || videoDeEmbedAvanza) {
             log("plan B: el embed arrancó (" + peticionesDeVideo + " peticiones de vídeo)");
@@ -3687,6 +3819,15 @@ public class PlayerActivity extends AppCompatActivity {
         }
         // v7.30: iba antes el feedback. En dzasports el cambio de canal se
         // siente al toque; aquí el título se repintaba y ya.
+        // v7.39.1 — el zapeo es otro cambio de canal DENTRO de la misma instancia (sin
+        // pasar por onNewIntent), así que tenía el mismo agujero: la carrera, el glasbi y
+        // los vigilantes del canal anterior seguían vivos y remataban al nuevo. Se invalida
+        // ANTES de mostrar el cargando (invalidar vacía la cola del handler y se llevaría
+        // por delante el vigilante del propio cargando).
+        invalidarCanalAnterior("zapeo");
+        if (player != null) {
+            try { player.stop(); player.clearMediaItems(); } catch (Throwable ignored) { }
+        }
         mostrarCargando();
         ZapeoCanales.indiceActual = idx;
         tituloCanalActual = canal.title;
