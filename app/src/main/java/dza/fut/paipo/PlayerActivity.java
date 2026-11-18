@@ -612,6 +612,13 @@ public class PlayerActivity extends AppCompatActivity {
                 // cuando más falta hacen. Antes solo se consultaba DENTRO del camino
                 // feliz de glasbi: si ese fallaba, la app nunca preguntaba nada.
                 pedirOpcionesEnSegundoPlano(canal);
+                // v7.39.0 — y la carrera arranca YA, con lo que haya: lo que la memoria del
+                // canal tenga y lo que la fuente haya dejado en streamUrl/streamBackup. Si
+                // luego llega la API, se le añaden sus opciones (ver lanzarCarrera). Antes
+                // se probaba una sola opción, en serie, y un host muerto costaba 63 s.
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { lanzarCarrera("arranque del canal"); }
+                });
                 try {
                     String ses = FuenteCanales.sesionDrama(PlayerActivity.this);
                     log("post glbr: " + DramaSesion.diagnosticoGlbr(ses)); // v3.2.12
@@ -655,6 +662,20 @@ public class PlayerActivity extends AppCompatActivity {
                                 long tPost = System.currentTimeMillis() - t0N;
                                 log("play nativo (glasbi) en " + tPost
                                         + " ms · " + vv.url + " · opciones=" + vv.opciones);
+                                // v7.39.0 — el «OK» de glasbi es una PROMESA, no una prueba:
+                                // en el logcat del usuario dio por bueno un host muerto a nivel
+                                // TCP. Se le da al reproductor (es lo que hacía la app de
+                                // referencia) y A LA VEZ se lanza la carrera, para que el que
+                                // responda primero gane aunque este no conteste nunca.
+                                // La url que dio glasbi entra como candidata explícita: puede
+                                // no estar todavía en streamUrl/streamBackup.
+                                final DramaResolucion.Opcion laDeGlasbi =
+                                        DramaResolucion.directaCon(vv.url, vv.ua, null);
+                                runOnUiThread(new Runnable() {
+                                    @Override public void run() {
+                                        lanzarCarrera("glasbi dio url", laDeGlasbi);
+                                    }
+                                });
                             } else {
                                 log("glasbi dio 201 sin stream directo (" + vv.url
                                         + "); se prueban las opciones del backup");
@@ -1797,6 +1818,11 @@ public class PlayerActivity extends AppCompatActivity {
             try { unregisterReceiver(pipReceiver); } catch (Exception ignored) { }
             pipReceiver = null;
         }
+        carreraCancelada = true;      // v7.39.0: que la carrera no entregue nada al salir
+        if (hilosDeCarrera != null) {
+            hilosDeCarrera.shutdownNow();
+            hilosDeCarrera = null;
+        }
         if (executorService != null) {
             executorService.shutdownNow();
             executorService = null;   // asegurarExecutor() lo crea de nuevo si hace falta
@@ -1828,8 +1854,14 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void setupMedia3Player() {
+        // v7.39.0 — connect 15 s -> 8 s. Medido en el logcat del usuario: cuatro
+        // SocketTimeoutException seguidos contra live.eighty-eight.tv:7770 (un host
+        // muerto a nivel TCP) costaban 60 s de pantalla en negro. Con la carrera de
+        // opciones (CarreraDeOpciones) el host muerto ya no bloquea, pero 8 s es además
+        // un techo sensato para un CDN que no contesta. La lectura se queda en 15 s:
+        // ahí sí puede haber un directo lento que merece la pena.
         dataSourceFactory = new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(15000)
+                .setConnectTimeoutMs(8000)
                 .setReadTimeoutMs(15000)
                 // v7.37.17 — MEDIDO en el movil del usuario (beIN Sports Fr1, 14:05):
                 // la "directa" del backup es http://ua.online24.pm/play/... y contesta
@@ -2033,6 +2065,10 @@ public class PlayerActivity extends AppCompatActivity {
                         break;
                     case Player.STATE_READY:
                         log("✅ Ready");
+                        // v7.39.0 — HAY IMAGEN. Desde aquí la carrera ya no toca nada: la
+                        // ganadora que llegue tarde se ignora (no se le cambia el canal al
+                        // usuario mientras lo está viendo).
+                        imagenConfirmada = true;
                         // v7.38.3 — si hay imagen, esta opción ya no está «fallida».
                         if (opcionActual >= 0) opcionesFallidas.remove(opcionActual);
                         // v7.37.17: el 200 no garantiza que sea el canal. El CDN de
@@ -2417,6 +2453,27 @@ public class PlayerActivity extends AppCompatActivity {
     private DramaResolucion.Opcion embedEnCurso = null;
 
     /**
+     * v7.39.0 — <b>¿esta opción es solo una promesa?</b> (y por tanto no bloquea arrancar
+     * la carrera a su lado).
+     *
+     * <p>Lo que trae Drama (glasbi/glbr) es lo único que se pone a sonar sin comprobar.
+     * Todo lo demás —las proxadas de la API, los recordados, los servidores del backup—
+     * entra en la carrera y solo llega al reproductor <em>si responde de verdad</em>.</p>
+     *
+     * <p>Y una «directa provisional» es también la url del glasbi cuando el proveedor
+     * manda un marcador: en el logcat del usuario el glasbi dijo «OK» con una url que
+     * resultó ser un host muerto a nivel TCP, y esa promesa costó 63 s.</p>
+     */
+    static boolean esPromesaSinComprobar(@androidx.annotation.Nullable DramaResolucion.Opcion o) {
+        if (o == null || o.descripcion == null) return true;
+        return o.descripcion.startsWith("api\u00b7")
+                || o.descripcion.startsWith("api·")
+                || o.descripcion.contains("recordado")
+                || o.descripcion.contains("del backup")
+                || o.descripcion.contains("marcador");
+    }
+
+    /**
      * v7.38.8 — lo que la API de la cadena dijo de ESTE canal, ya convertido a opciones
      * del plan B: primero la playlist proxada ({@code /p/…}, que ExoPlayer abre nativo)
      * y detrás la página original de cada opción que emite.
@@ -2426,6 +2483,50 @@ public class PlayerActivity extends AppCompatActivity {
      * todo funciona como en la v7.38.7.</p>
      */
     private java.util.List<DramaResolucion.Opcion> opcionesDeLaApi = null;
+
+    // ───────────────── v7.39.0 — LA CARRERA DE OPCIONES ─────────────────
+    //
+    // Medido en el logcat del usuario (2026-11-18 01:09:19 → 01:11:02): la app se
+    // quedó 63 s esperando un host muerto (live.eighty-eight.tv:7770, cuatro timeouts
+    // de 15 s) mientras la API YA tenía la proxada buena desde el segundo 11, y esa
+    // proxada contestó 200 en 1 s. La espera era en serie y no hacía falta.
+
+    /** El hilo dueño de la corrida; la carrera siempre va aquí, nunca en UI. */
+    private ExecutorService hilosDeCarrera;
+
+    /** Se pone a true al salir de la pantalla para que la carrera no entregue nada. */
+    private volatile boolean carreraCancelada = false;
+
+    /**
+     * v7.39.0 — urls que YA se lanzaron a la carrera en este canal.
+     *
+     * <p>La carrera es <b>incremental</b>: arranca en cuanto hay algo que probar (lo que
+     * dio glasbi) y admite más tarde lo que traiga la API — en el logcat del usuario la
+     * API contestó a los 11,7 s y su proxada buena estaba ahí desde entonces. Con esta
+     * lista no se pide dos veces la misma url y no hay dos carreras peleándose por lo
+     * mismo; si dos compiten, la que primero da manifiesto gana ({@link #imagenConfirmada}).</p>
+     */
+    private final java.util.Set<String> urlsEnCarrera =
+            java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<String>());
+
+    /** ¿Hay ahora mismo alguna carrera con hilos vivos? Solo para el log. */
+    private volatile boolean carreraEnMarcha = false;
+
+    /**
+     * v7.39.0 — <b>¿ya hay imagen de vídeo, o solo un «preparando»?</b>
+     *
+     * <p>No vale {@code streamReady}: se pone a true al llamar a {@code prepare()}, así
+     * que con un host muerto también vale true — que es justo lo que pasó en el logcat
+     * (63 s con {@code streamReady} en true y la pantalla en negro). Esto solo se enciende
+     * en {@code STATE_READY}, y se apaga cada vez que se empieza a cargar otra fuente.</p>
+     */
+    private volatile boolean imagenConfirmada = false;
+
+    /** Cuándo se mandó la fuente actual al reproductor (para la ventana de cortesía). */
+    private volatile long arranqueDeLaFuenteMs = 0L;
+
+    /** Handler donde aterriza la ganadora (la UI construye el reproductor). */
+    private final Handler uiDeLaCarrera = new Handler(Looper.getMainLooper());
 
     /**
      * v7.38.9 — lanza la consulta a la API <b>al margen</b> y sigue.
@@ -2460,18 +2561,19 @@ public class PlayerActivity extends AppCompatActivity {
                     // manda el /p/… del proxy a ExoPlayer, y con eso abre todos los
                     // canales. Aquí se hace lo mismo cuando el arranque todavía no ha
                     // dado imagen; si ya hay vídeo, no se toca nada.
-                    final boolean arrancaPorProxy = !streamReady;
+                    // v7.39.0 — si aún NO hay imagen, no se elige «la primera» a ciegas: se
+                    // lanza la carrera con TODAS las opciones (la de la API, la que dio
+                    // glasbi, los recordados) y gana la que responda primero. Es lo que el
+                    // usuario pedía y lo que evita los 63 s del logcat.
+                    final boolean arrancaPorCarrera = !imagenConfirmada;
                     log("api: plan B ampliado a " + ops.size() + " opciones"
-                            + (arrancaPorProxy ? " — arrancando por el proxy" : ""));
-                    if (!arrancaPorProxy) return;
+                            + (arrancaPorCarrera ? " — a la carrera" : ""));
+                    if (!arrancaPorCarrera) return;
 
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            if (isFinishing() || streamReady) return;
-                            DramaResolucion.Opcion primera = siguienteOpcionUtil();
-                            if (primera == null) return;
-                            log("api: sin esperar a Drama -> " + primera.etiqueta());
-                            probarServidor(primera);
+                            if (isFinishing() || imagenConfirmada) return;
+                            lanzarCarrera("la API respondió");
                         }
                     });
                 }
@@ -2479,6 +2581,150 @@ public class PlayerActivity extends AppCompatActivity {
         } catch (Throwable t) {
             log("api: no se pudo lanzar la consulta (" + t.getClass().getSimpleName() + ")");
         }
+    }
+
+    /**
+     * v7.39.0 — <b>LANZA LA CARRERA: todas las opciones a la vez, gana la que responde
+     * primero.</b>
+     *
+     * <p><b>Por qué existe, con los números del logcat del usuario</b> (2026-11-18,
+     * {@code live_tv_aljeriaelheddaf}):</p>
+     *
+     * <pre>
+     * 01:09:19  glasbi dice «OK»  -> live.eighty-eight.tv:7770/elheddaf1/index.m3u8
+     * 01:09:30  la API ya trae las 4 proxadas (11,7 s de reloj) · nadie las mira
+     * 01:09:34  timeout 15 s │ 01:09:49 timeout 15 s │ 01:10:05 timeout 15 s
+     * 01:10:22  cuarto timeout 15 s -> ExoPlayer se rinde          = 63 s perdidos
+     * 01:11:02  ...y recién ahí se prueba la proxada [0]
+     * 01:11:03  la proxada [0] responde HTTP 200 en 1 s            = 1 s
+     * </pre>
+     *
+     * <p>Las opciones no compiten por nada: son urls distintas en hosts distintos. Así que
+     * se piden todas a la vez y la primera que devuelve un {@code #EXTM3U} de verdad va al
+     * reproductor. Las demás se cierran. Un host muerto ya no se espera: se queda atrás.</p>
+     *
+     * <p>Corre siempre en su propio hilo. No toca el reproductor: de eso se encarga
+     * {@link #aplicarGanadora} en el hilo de la UI.</p>
+     *
+     * @param motivo de dónde salieron las candidatas, solo para el log
+     */
+    private void lanzarCarrera(final String motivo,
+                              @androidx.annotation.Nullable DramaResolucion.Opcion... extra) {
+        if (carreraCancelada || isFinishing() || imagenConfirmada) return;
+        final java.util.List<DramaResolucion.Opcion> plan = new java.util.ArrayList<>();
+        if (extra != null) {
+            for (DramaResolucion.Opcion e : extra) if (e != null) plan.add(e);
+        }
+        plan.addAll(planCompletoDelCanal());
+        final java.util.List<DramaResolucion.Opcion> cands = new java.util.ArrayList<>();
+        for (DramaResolucion.Opcion c : CarreraDeOpciones.candidatas(plan)) {
+            if (urlsEnCarrera.add(c.url)) cands.add(c);          // solo lo NUEVO
+        }
+        if (cands.isEmpty()) {
+            if (!plan.isEmpty()) log("🏁 carrera: nada nuevo que probar (" + motivo + ")");
+            return;
+        }
+        carreraEnMarcha = true;
+        for (DramaResolucion.Opcion c : cands) {
+            if (!servidoresProbados.contains(c.url)) servidoresProbados.add(c.url);
+        }
+        log("🏁 carrera: " + cands.size() + " opciones a la vez (" + motivo + ")");
+        for (DramaResolucion.Opcion c : cands) log("   · en carrera: " + c.etiqueta());
+        hiloDeCarrera().execute(new Runnable() {
+            @Override public void run() {
+                long t0 = System.currentTimeMillis();
+                CarreraDeOpciones.Respuesta g = CarreraDeOpciones.correr(cands,
+                        new CarreraDeOpciones.Oyente() {
+                            @Override public void ganadora(final CarreraDeOpciones.Respuesta r) {
+                                log("🏁 carrera ganada en " + r.ms + " ms (" + r.motivo + ") -> "
+                                        + r.opcion.url);
+                                final CarreraDeOpciones.Respuesta rr = r;
+                                uiDeLaCarrera.post(new Runnable() {
+                                    @Override public void run() { aplicarGanadora(rr); }
+                                });
+                            }
+
+                            @Override public void descartada(CarreraDeOpciones.Respuesta r) {
+                                log("🏁 descartada (" + r.motivo + ", " + r.ms + " ms): " + r.opcion.url);
+                            }
+
+                            @Override public void ninguna(java.util.List<CarreraDeOpciones.Respuesta> intentos) {
+                                log("🏁 carrera: ninguna responde (" + intentos.size() + " probadas)");
+                            }
+                        });
+                long ms = System.currentTimeMillis() - t0;
+                if (g == null) {
+                    uiDeLaCarrera.post(new Runnable() {
+                        @Override public void run() {
+                            carreraEnMarcha = false;
+                            // Ninguna de la carrera sirve. Ya quedaron marcadas como
+                            // probadas al lanzarlas, así que el camino de siempre
+                            // (embebidas de Drama, WebView, la cura) no las repite.
+                            if (!imagenConfirmada) avisarSinStream();
+                        }
+                    });
+                } else {
+                    uiDeLaCarrera.post(new Runnable() {
+                        @Override public void run() { carreraEnMarcha = false; }
+                    });
+                }
+                log("🏁 carrera cerrada en " + ms + " ms");
+            }
+        });
+    }
+
+    /** Hilos de la carrera: uno a uno por canal, y da igual esperar. */
+    private ExecutorService hiloDeCarrera() {
+        if (hilosDeCarrera == null || hilosDeCarrera.isShutdown()) {
+            hilosDeCarrera = Executors.newSingleThreadExecutor();
+        }
+        return hilosDeCarrera;
+    }
+
+    /** El plan del canal AHORA: memoria → API → lo que trajo Drama. Sin probar. */
+    private java.util.List<DramaResolucion.Opcion> planCompletoDelCanal() {
+        java.util.List<DramaResolucion.Opcion> recordados = null;
+        if (canalActual != null) {
+            recordados = ServidoresDelCanal.opciones(ServidoresDelCanal.leer(this,
+                    ServidoresDelCanal.claveDeCanal(canalActual)));
+        }
+        return DramaResolucion.planDeAtaque(recordados, opcionesDeLaApi,
+                DramaResolucion.utiles(streamUrl, streamBackup));
+    }
+
+    /**
+     * v7.39.0 — la ganadora va al reproductor. Una sola vez, y con cortesía:
+     *
+     * <p>Si la fuente que está sonando ya dio imagen, no se toca (no se cambia el canal
+     * que el usuario está viendo). Si aún está en negro, se cambia — con una ventana de
+     * 1,2 s de cortesía para no cortar un arranque que estaba a punto de cuajar.</p>
+     */
+    private void aplicarGanadora(final CarreraDeOpciones.Respuesta r) {
+        if (r == null || r.opcion == null) return;
+        if (isFinishing() || carreraCancelada) return;
+        if (imagenConfirmada) {
+            log("🏁 la ganadora llega tarde (ya hay imagen): se ignora");
+            return;
+        }
+        long desdeElArranque = System.currentTimeMillis() - arranqueDeLaFuenteMs;
+        long espera = Math.max(0L, 1200L - desdeElArranque);
+        if (espera > 0) {
+            log("🏁 ganadora en espera " + espera + " ms (cortesía con el arranque actual)");
+            uiDeLaCarrera.postDelayed(new Runnable() {
+                @Override public void run() { aplicarGanadoraYa(r); }
+            }, espera);
+            return;
+        }
+        aplicarGanadoraYa(r);
+    }
+
+    private void aplicarGanadoraYa(CarreraDeOpciones.Respuesta r) {
+        if (r == null || r.opcion == null) return;
+        if (isFinishing() || carreraCancelada || imagenConfirmada) return;
+        log("🎬 la ganadora de la carrera va al reproductor -> " + r.opcion.url);
+        urlIframeInicial = null;
+        mostrarChipCalidad();
+        probarServidor(r.opcion);
     }
 
     /**
@@ -2523,20 +2769,6 @@ public class PlayerActivity extends AppCompatActivity {
             return null;
         }
     }
-
-    /** La opción de Drama que se está mostrando como embed (su UA manda). */
-    private DramaResolucion.Opcion embedEnCurso = null;
-
-    /**
-     * v7.38.8 — lo que la API de la cadena dijo de ESTE canal, ya convertido a opciones
-     * del plan B: primero la playlist proxada ({@code /p/…}, que ExoPlayer abre nativo)
-     * y detrás la página original de cada opción que emite.
-     *
-     * <p>Se rellena en el hilo de fondo del arranque de canal, antes de que el plan B
-     * tenga que elegir. Si queda vacía es que no hay API configurada o no contestó, y
-     * todo funciona como en la v7.38.7.</p>
-     */
-    private java.util.List<DramaResolucion.Opcion> opcionesDeLaApi = null;
 
     /**
      * Vuelve a la lista de servidores del canal y devuelve el siguiente que aún no
@@ -3909,6 +4141,10 @@ public class PlayerActivity extends AppCompatActivity {
         mostrarCargando();
         log("Reproduciendo stream m3u8 directo (sin WebView)");
         isResolving = false;
+        // v7.39.0 — fuente nueva: todavía NO hay imagen. Y se apunta la hora, que es lo que
+        // usa la carrera para dar 1,2 s de cortesía antes de cambiar de fuente.
+        imagenConfirmada = false;
+        arranqueDeLaFuenteMs = System.currentTimeMillis();
         // v7.38.4 — esta directa también cuenta como servidor probado del canal.
         if (!servidoresProbados.contains(url)) servidoresProbados.add(url);
         mainHandler.post(() -> {
