@@ -145,18 +145,20 @@ final class ApiDrama {
         boolean podriaEmitir() {
             if (sirve()) return true;
             if (url == null || !url.startsWith("http")) return false;
+            // Solo un NO ROTUNDO del servidor descarta una opción.
             if (http == 403 || http == 404 || http == 410) return false;
-            // v7.38.10 — CORRECCIÓN de la v7.38.9. En la 7.38.9 rescataba cualquier
-            // ".mpd" con 2xx. Estaba mal: medido el 2026-11-18, esos .mpd son
-            // "cenc.mpd" / "..._dash_enc/index.mpd" y van cifrados en Widevine, que no
-            // se puede abrir sin licencia. El propio diagnóstico del proyecto
-            // (docs/DIAGNOSTICO-CANALES-DRAMA-v7.38.3.md) ya lo decía: "los de
-            // starzplay son Widevine (imposible con clave suelta)". Meterlos en el plan
-            // solo gasta turnos. Se quedan fuera.
+            // Widevine no se abre sin licencia: no gasta turno.
             if (esDashCifrado()) return false;
-            // Un 2xx con cuerpo que NO es un manifiesto cifrado: la API no supo leerlo
-            // (p. ej. una página .html con el stream dentro). Eso sí vale la pena.
-            return http >= 200 && http < 300;
+            // v7.38.11 — LO IMPORTANTE: un timeout NO descarta.
+            //
+            // La v7.38.8–7.38.10 exigían 2xx, así que se comían las opciones con
+            // http:null (la sonda de la API les dio timeout a los 10 s). Y esas son
+            // justo las que el proxy SÍ resuelve. Medido hoy:
+            //   beIN 5, n=0 → http:null, timeout 13,3 s → /p/…/0.m3u8 da #EXTM3U
+            //   beIN 2, n=0 → http:null, timeout 13,1 s → /p/…/0.m3u8 da #EXTM3U
+            // Es exactamente el fallo de «faltan canales»: la API decía «no sé» y yo
+            // lo leía como «no».
+            return true;
         }
 
         /**
@@ -217,6 +219,30 @@ final class ApiDrama {
             }
             List<OpcionApi> out = new ArrayList<>(confirmadas);
             out.addAll(dudosas);
+            return out;
+        }
+
+        /**
+         * v7.38.11 — <b>TODAS las opciones que se pueden probar, en el orden de la app de
+         * referencia</b>: primero las que la API confirmó, después las demás por su
+         * número. Sin descartar nada por {@code emite} (ver {@link #aOpciones}).
+         */
+        @NonNull
+        List<OpcionApi> ordenParaProbar() {
+            List<OpcionApi> confirmadas = new ArrayList<>();
+            List<OpcionApi> resto = new ArrayList<>();
+            for (OpcionApi o : opciones) {
+                if (o.url == null || !o.url.startsWith("http")) continue;
+                if (o.sirve()) confirmadas.add(o);
+                else if (o.podriaEmitir()) resto.add(o);
+            }
+            java.util.Collections.sort(resto, new java.util.Comparator<OpcionApi>() {
+                @Override public int compare(OpcionApi a, OpcionApi b) {
+                    return Integer.compare(a.n, b.n);
+                }
+            });
+            List<OpcionApi> out = new ArrayList<>(confirmadas);
+            out.addAll(resto);
             return out;
         }
 
@@ -290,15 +316,38 @@ final class ApiDrama {
     }
 
     /**
-     * Convierte lo que dice la API en opciones para el plan B.
+     * v7.38.11 — <b>LA ESTRATEGIA DE LA APP QUE SÍ FUNCIONA.</b>
      *
-     * <p><b>El orden importa.</b> Por cada opción que emite se ponen dos entradas: primero
-     * la playlist ya proxada ({@code /p/…}, que ExoPlayer abre de forma nativa: sin
-     * WebView, sin sniffer, sin CORS) y detrás la página original como {@code EMBEBIDA},
-     * que es el plan B. Las que la API da por muertas pero traen contenido (DASH, o un
-     * 200 que no sabe leer) se añaden al final con su URL directa: es gratis probarlas.</p>
+     * <p>Analizada la app de referencia ({@code DramaLive-Android-v1.0}, {@code Api.java}):
+     * su regla es de una línea:</p>
      *
-     * @param base   raíz de la API (puede ser null: entonces no hay proxada)
+     * <pre>
+     * public String urlReproducible(String codigo, String idCanal) {
+     *     if (!hls) return url;                                   // radio: directa
+     *     return BASE + "/p/" + codigo + "/" + idCanal + "/" + n + ".m3u8";
+     * }
+     * </pre>
+     *
+     * <p>O sea: para TODAS las opciones, en el orden que da la API, se le pide el
+     * manifiesto al proxy — sin mirar {@code emite}. Y funciona porque <b>el proxy
+     * resuelve aunque la sonda de la API haya fallado</b>. Medido hoy:</p>
+     *
+     * <pre>
+     * beIN 5, opción 0 → emite:false · http:null · timeout 13,3 s
+     *                    /p/232425/live_tv_beinsport5/0.m3u8 → #EXTM3U válido
+     * beIN 2, opción 0 → emite:false · http:null · timeout 13,1 s
+     *                    /p/232425/live_tv_beinsport2/0.m3u8 → #EXTM3U válido
+     * </pre>
+     *
+     * <p>Es decir: mi filtro de las v7.38.8–7.38.10 se estaba comiendo opciones buenas
+     * porque le creía a {@code emite}. La sonda de la API es un GET con timeout de 10 s;
+     * un host lento aparece como muerto y luego el proxy —que sí espera— lo resuelve.</p>
+     *
+     * <p><b>Orden:</b> primero las confirmadas (verde de la API), después el resto por
+     * {@code n}, y de cada una la proxada delante. Se pide UN turno por opción: la
+     * proxada. La página original solo queda como respaldo del proxy.</p>
+     *
+     * @param base   raíz de la API (sin base no hay proxada: modo local)
      * @param codigo código de país de Drama ({@code 232425})
      * @param idLive id del canal ({@code live_tv_beinsport1})
      */
@@ -312,25 +361,22 @@ final class ApiDrama {
         String c = (codigo == null || codigo.trim().isEmpty()) ? o.codigo : codigo;
         String d = (idLive == null || idLive.trim().isEmpty()) ? o.idLive : idLive;
 
-        for (OpcionApi x : o.queEmiten()) {
-            // v7.38.9 — un portal (YouTube & cía) nunca entrega el canal a un WebView sin
-            // sesión: no merece ocupar un turno del plan B. Se corta aquí, en origen.
+        for (OpcionApi x : o.ordenParaProbar()) {
             if (DramaResolucion.esPaginaDePortal(x.url)) continue;
-            if (x.esDashCifrado()) {
-                // Se deja constancia en el log: antes esto era un turno perdido.
-                android.util.Log.d(TAG, "api drama: [" + x.n + "] DASH cifrado (Widevine), "
-                        + "no se puede abrir sin licencia: " + x.url);
-                continue;
-            }
-            boolean confirmada = x.sirve();
-            // v7.38.9 — la proxada SOLO para lo que la API confirmó como HLS. Su proxy
-            // contesta «esa opción no es un manifiesto HLS (usa su URL directa)» a todo
-            // lo demás, y una url que se sabe que falla no debe ocupar un turno.
-            String proxada = confirmada ? urlPlaylist(base, c, d, x.n) : null;
+
+            // 1) El turno que de verdad se prueba: el proxy. Vale para cualquier opción
+            //    de un canal HLS, diga la API lo que diga (ver el javadoc de arriba).
+            String proxada = urlPlaylist(base, c, d, x.n);
             if (proxada != null) {
                 out.add(new DramaResolucion.Opcion(proxada, DramaResolucion.Tipo.DIRECTA,
-                        null, null, "api·proxy [" + x.n + "] " + x.tipo, false));
+                        null, null,
+                        (x.emite ? "api·proxy [" : "api·proxy? [") + x.n + "] " + x.tipo,
+                        false));
             }
+
+            // 2) Respaldo: la url original. Solo si el proxy no estuviera disponible.
+            if (proxada != null) continue;
+            if (x.esDashCifrado()) continue;              // Widevine: imposible, no gasta turno
             DramaResolucion.Tipo t;
             if ("directa".equalsIgnoreCase(x.tipo) || DramaResolucion.esPlaylist(x.url)) {
                 t = DramaResolucion.Tipo.DIRECTA;
@@ -339,8 +385,6 @@ final class ApiDrama {
             } else {
                 t = DramaResolucion.Tipo.PAGINA;
             }
-            // La proxada ya cubre el caso de "directa": no duplicamos el mismo stream.
-            if (t == DramaResolucion.Tipo.DIRECTA && proxada != null) continue;
             out.add(DramaResolucion.deApi(x.url, t, x.ua, x.referer, x.n));
         }
         return out;

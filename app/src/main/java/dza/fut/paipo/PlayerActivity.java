@@ -2453,7 +2453,27 @@ public class PlayerActivity extends AppCompatActivity {
                     java.util.List<DramaResolucion.Opcion> ops = pedirOpcionesALaApi(canal);
                     if (ops == null || ops.isEmpty()) return;
                     opcionesDeLaApi = ops;
-                    log("api: plan B ampliado a " + ops.size() + " opciones (llego tarde o temprano, da igual)");
+
+                    // v7.38.11 — si el proxy ya nos da una playlist, NO hay por qué
+                    // esperar a la sesión de Drama. La app de referencia
+                    // (DramaLive-Android v1.0) no la usa para nada: pide /opciones y
+                    // manda el /p/… del proxy a ExoPlayer, y con eso abre todos los
+                    // canales. Aquí se hace lo mismo cuando el arranque todavía no ha
+                    // dado imagen; si ya hay vídeo, no se toca nada.
+                    final boolean arrancaPorProxy = !streamReady;
+                    log("api: plan B ampliado a " + ops.size() + " opciones"
+                            + (arrancaPorProxy ? " — arrancando por el proxy" : ""));
+                    if (!arrancaPorProxy) return;
+
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (isFinishing() || streamReady) return;
+                            DramaResolucion.Opcion primera = siguienteOpcionUtil();
+                            if (primera == null) return;
+                            log("api: sin esperar a Drama -> " + primera.etiqueta());
+                            probarServidor(primera);
+                        }
+                    });
                 }
             });
         } catch (Throwable t) {

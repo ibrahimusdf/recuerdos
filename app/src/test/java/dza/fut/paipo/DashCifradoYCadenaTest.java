@@ -89,7 +89,9 @@ public class DashCifradoYCadenaTest {
         assertEquals(1, o.emitiendo);
         List<DramaResolucion.Opcion> ops =
                 ApiDrama.aOpciones("https://api", "232425", "live_tv_beinsport1max", o);
-        assertEquals("proxada + página de la única sana", 2, ops.size());
+        // v7.38.11 — un turno por opción: la proxada de la única sana.
+        assertEquals("solo la proxada de la única sana", 1, ops.size());
+        assertTrue("y es la proxada", ops.get(0).url.contains("/p/"));
         for (DramaResolucion.Opcion x : ops) {
             assertFalse("ningún Widevine: " + x.url, x.url.contains(".mpd"));
             assertFalse("ningún 403: " + x.url, x.url.contains("ordernap")

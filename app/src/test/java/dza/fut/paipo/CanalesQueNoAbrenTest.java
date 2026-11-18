@@ -148,12 +148,11 @@ public class CanalesQueNoAbrenTest {
                 + "\"headers\":{},\"emite\":true,\"hls\":true,\"http\":200}]}";
         List<DramaResolucion.Opcion> ops =
                 ApiDrama.aOpciones(BASE, CODIGO, "live_tv_alkaas2", ApiDrama.leerOpciones(j));
-        assertEquals(2, ops.size());
+        // v7.38.11 — un turno por opción: la proxada.
+        assertEquals(1, ops.size());
         assertEquals(BASE + "/p/232425/live_tv_alkaas2/0.m3u8", ops.get(0).url);
         assertEquals(DramaResolucion.Tipo.DIRECTA, ops.get(0).tipo);
         assertTrue(DramaResolucion.esPlaylist(ops.get(0).url));
-        assertEquals("y detrás su página, como plan B",
-                DramaResolucion.Tipo.EMBEBIDA, ops.get(1).tipo);
     }
 
     // ───────────────────────── el tiempo ya no frena ─────────────────────────

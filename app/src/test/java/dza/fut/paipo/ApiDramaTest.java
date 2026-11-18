@@ -152,16 +152,17 @@ public class ApiDramaTest {
      */
     @Test
     public void aOpcionesPoneElProxyDelanteDeCadaEmisora() throws IOException {
+        // v7.38.11 — UN TURNO POR OPCIÓN: solo la proxada (como la app de
+        // referencia). La página original queda como respaldo del proxy, no como
+        // turno propio, o el plan B se duplica y tarda el doble.
         List<DramaResolucion.Opcion> l =
                 ApiDrama.aOpciones(BASE, CODIGO, ID, ApiDrama.leerOpciones(fixture()));
-        assertEquals(6, l.size());
+        assertEquals(3, l.size());
         assertEquals(BASE + "/p/232425/live_tv_beinsport1/1.m3u8", l.get(0).url);
         assertEquals(DramaResolucion.Tipo.DIRECTA, l.get(0).tipo);
-        assertEquals(EMITEN[0], l.get(1).url);
-        assertEquals(DramaResolucion.Tipo.EMBEBIDA, l.get(1).tipo);
-        assertTrue(l.get(1).iframe);        // se abre en el marco
-        assertEquals(BASE + "/p/232425/live_tv_beinsport1/2.m3u8", l.get(2).url);
-        assertEquals(BASE + "/p/232425/live_tv_beinsport1/0.m3u8", l.get(4).url);
+        assertEquals(BASE + "/p/232425/live_tv_beinsport1/2.m3u8", l.get(1).url);
+        assertEquals(BASE + "/p/232425/live_tv_beinsport1/0.m3u8", l.get(2).url);
+        for (DramaResolucion.Opcion o : l) assertTrue(o.url.contains("/p/"));
     }
 
     @Test
