@@ -699,6 +699,7 @@ public class PlayerActivity extends AppCompatActivity {
                             return;
                         }
                         if (rr[1] != null && !rr[1].isEmpty()) streamCabeceras = "User-Agent: " + rr[1];
+                        uaEnJuego = rr[1];
                         streamReferer = "https://web.dramalive.cc/";
                         streamOrigin = "https://web.dramalive.cc";
                         log("glbr resuelto -> " + rr[0]);
@@ -2034,6 +2035,17 @@ public class PlayerActivity extends AppCompatActivity {
                         RegistroCarga.paso("primer fotograma (ExoPlayer)");
                         RegistroCarga.fin();
                         errorRefreshCount = 0;
+                        // v7.38.7 — AQUÍ ES DONDE SE APRENDE. Si ExoPlayer llegó a
+                        // READY con esta url, este canal ya tiene un servidor que
+                        // emite: se guarda con SU UA y SU Referer para que la próxima
+                        // vez se empiece por él y no por los 30 s de sondeo del embed.
+                        //
+                        // No se apunta si es la tarjeta rusa (el READY llega igual,
+                        // porque es un m3u8 válido): eso lo decide
+                        // revisarSiElStreamEsUnAviso, que corre inmediatamente después.
+                        // Por eso el apunte se hace DIFERIDO: si en 3 s el flujo no se
+                        // ha ido al embed por «aviso», es que era vídeo de verdad.
+                        recordarServidorQueFunciona(urlEnReproduccion);
                         updatePlayPauseButton();
                         ocultarCargando();
                         ocultarErrorPlayer();
@@ -2378,6 +2390,7 @@ public class PlayerActivity extends AppCompatActivity {
         if (opcion == null || opcion.url == null) { avisarSinStream(); return; }
         String ua = DramaResolucion.pareceUnUa(opcion.ua) ? opcion.ua : UA_DEL_EMBED;
         streamCabeceras = "User-Agent: " + ua;
+        uaEnJuego = ua;                      // v7.38.7: lo que se apunta si reproduce
         if (opcion.referer != null && !opcion.referer.isEmpty()) {
             streamReferer = opcion.referer;
             streamOrigin = origenDe(opcion.referer);
@@ -2399,7 +2412,15 @@ public class PlayerActivity extends AppCompatActivity {
      * marcadores. Así no queda ningún servidor sin intentar.
      */
     private DramaResolucion.Opcion siguienteOpcionUtil() {
-        return siguienteOpcionUtil(streamUrl, streamBackup, servidoresProbados);
+        // v7.38.7 — se pasa la MEMORIA del canal: lo que ya se vio reproducir aquí va
+        // antes que lo que Drama acaba de entregar.
+        java.util.List<DramaResolucion.Opcion> recordados = null;
+        if (canalActual != null) {
+            recordados = ServidoresDelCanal.opciones(
+                    ServidoresDelCanal.leer(this,
+                            ServidoresDelCanal.claveDeCanal(canalActual)));
+        }
+        return siguienteOpcionUtil(streamUrl, streamBackup, servidoresProbados, recordados);
     }
 
     /**
@@ -2606,6 +2627,37 @@ public class PlayerActivity extends AppCompatActivity {
         return u.contains(".m3u8") && !u.contains(".m3u8.bak");
     }
 
+    /**
+     * v7.38.7 — apunta un servidor como «este sí emite en este canal», <b>después de
+     * comprobar que no es la tarjeta de aviso</b>.
+     *
+     * <p>El {@code STATE_READY} de ExoPlayer no basta: el CDN sirve el cartel ruso
+     * «ОТСУТСТВУЕТ ПОДПИСКА» como un m3u8 perfectamente válido y el player lo da por
+     * bueno (visto en beIN Fr1). Si se aprendiera de ahí, la app recordaría el cartel
+     * como «el servidor bueno» y lo pondría el primero para siempre. Por eso se
+     * espera 3 s: si en ese tiempo {@code revisarSiElStreamEsUnAviso} no ha saltado al
+     * embed, la url es vídeo real.</p>
+     */
+    private void recordarServidorQueFunciona(final String url) {
+        if (url == null || url.isEmpty() || canalActual == null) return;
+        final String llave = ServidoresDelCanal.claveDeCanal(canalActual);
+        final String uaFinal = uaEnJuego;
+        final String refFinal = streamReferer;
+        mainHandler.removeCallbacks(apunteServidorRun);
+        apunteServidorRun = () -> {
+            if (isFinishing() || avisoDeStreamYaVisto) return;
+            if (!streamReady) return;
+            ServidoresDelCanal.apuntarExito(PlayerActivity.this, llave, url, uaFinal, refFinal);
+            log("💾 servidor recordado para este canal: " + url);
+        };
+        mainHandler.postDelayed(apunteServidorRun, 3000);
+    }
+
+    /** El UA con el que se está pidiendo el stream ahora mismo (o null). */
+    private String uaEnJuego = null;
+
+    private Runnable apunteServidorRun = null;
+
     /** Guarda el playlist del embed con las cabeceras con las que lo pidió su JS. */
     private void recordarPlaylistCazado(String url,
                                         java.util.Map<String, String> cabeceras) {
@@ -2643,6 +2695,7 @@ public class PlayerActivity extends AppCompatActivity {
         embeddedEnVentana = false;
         streamReferer = playlistCazadoReferer;
         streamOrigin = origenDe(playlistCazadoReferer);
+        uaEnJuego = playlistCazadoUa;
         streamCookies = null;
         resolverStreamDirecto(url, null, playlistCazadoReferer, streamOrigin);
         // si el nativo no arranca en 12 s, se vuelve al embed (que sí se estaba viendo)
@@ -3343,6 +3396,19 @@ public class PlayerActivity extends AppCompatActivity {
             servidoresProbados.clear();
             canalCuyosServidoresSeEstanProbando = url;
         }
+        // v7.38.7 — qué sabe la app YA de este canal. Si hay servidores recordados, el
+        // log lo dice aquí: es la diferencia entre abrir a ciegas y abrir sabiendo.
+        try {
+            String llave = ServidoresDelCanal.claveDeCanal(url);
+            java.util.List<ServidoresDelCanal.Conocido> sabidos =
+                    ServidoresDelCanal.leer(this, llave);
+            if (sabidos.isEmpty()) {
+                log("servidores: primera vez en este canal — sin memoria todavía");
+            } else {
+                log("servidores: " + sabidos.size() + " recordados de este canal"
+                        + " (el primero: " + sabidos.get(0).url + ")");
+            }
+        } catch (Throwable ignored) { }
         pintarChipsServidores();
         log("\uD83D\uDD01 Servidor elegido a mano: " + opcionesServidor.get(idx)[0]);
         isResolving = false;

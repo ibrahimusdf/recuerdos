@@ -86,6 +86,63 @@ public final class DramaResolucion {
     private DramaResolucion() { }
 
     /**
+     * v7.38.7 — una url que YA se vio reproducir en este canal, con las cabeceras
+     * exactas con las que el CDN la aceptó. Se clasifica por su forma: un m3u8 es
+     * DIRECTA y se abre en ExoPlayer. Si algún día llega algo que no es un stream,
+     * se marca PAGINA y el plan B no lo tratará como vídeo.
+     */
+    @NonNull
+    static Opcion directaCon(@NonNull String url, @Nullable String ua, @Nullable String referer) {
+        Tipo t = clasificar(url, false);
+        if (t != Tipo.DIRECTA) t = Tipo.PAGINA;
+        String n = t == Tipo.DIRECTA ? "recordado" : "recordado (no es stream)";
+        Opcion o = new Opcion(url, t, ua, referer, n, false);
+        return o;
+    }
+
+    /**
+     * v7.38.7 — <b>fusiona lo que la app RECUERDA de este canal con lo que acaba de
+     * entregar Drama.</b> Los recordados van primero: ya se comprobó que emiten.
+     *
+     * <p>Se deduplica por url: si Drama vuelve a entregar la misma url, no se repite.
+     * Y una url recordada nunca se degrada — se conserva su UA y su Referer, que son
+     * los que el CDN exige (con otro UA contesta 403; medido con primetv).</p>
+     *
+     * @param recordados los que la app ya vio funcionar en este canal ({@code ServidoresDelCanal})
+     * @param utiles     los que Drama acaba de entregar ({@link #utiles})
+     */
+    @NonNull
+    static List<Opcion> conRecordados(@Nullable List<Opcion> recordados,
+                                      @Nullable List<Opcion> utiles) {
+        List<Opcion> out = new ArrayList<>();
+        LinkedHashSet<String> vistos = new LinkedHashSet<>();
+
+        // 1) lo recordado, en el orden en que la propia memoria lo puso (fiables primero)
+        if (recordados != null) {
+            for (Opcion o : recordados) {
+                if (o == null || o.url == null) continue;
+                if (o.tipo == Tipo.MARCADOR) continue;
+                if (!vistos.add(clave(o.url))) continue;
+                out.add(o);
+            }
+        }
+
+        // 2) lo que Drama entrega ahora, saltando lo que ya está recordado (así NO se
+        //    pierden el UA ni el Referer con los que el CDN ya aceptó esa url)
+        List<Opcion> nuevas = new ArrayList<>();
+        if (utiles != null) {
+            for (Opcion o : utiles) {
+                if (o == null || o.url == null) continue;
+                if (!vistos.add(clave(o.url))) continue;
+                nuevas.add(o);
+            }
+        }
+        // el orden conocido de Drama (embebidas antes que directas) se conserva en la cola
+        out.addAll(ordenarSinRepetir(nuevas));
+        return out;
+    }
+
+    /**
      * Todos los servidores del canal, en orden de utilidad y sin repetir.
      *
      * @param url     {@code live.url} (suele ser un marcador)
