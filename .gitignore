@@ -1,0 +1,17 @@
+# Descargas de Drive (se vuelven a bajar; no son fuente)
+google_drive/
+
+# Build de Android / Gradle
+build/
+app/build/
+.gradle/
+local.properties
+*.apk
+*.aab
+*.iml
+.idea/
+
+# Salidas de herramientas
+node_modules/
+__pycache__/
+*.pyc

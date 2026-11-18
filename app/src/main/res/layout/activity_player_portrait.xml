@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reproductor en RETRATO — disposición del player principal de DzaSports:
+
+    · Vídeo de 300dp pegado arriba.
+    · Cabecera transparente superpuesta: atrás (40dp) + título del canal
+      (16sp bold) y servidores con refrescar (28dp).
+    · Controles CENTRADOS de 55dp sobre el vídeo, con PiP.
+    · Tira de canales de 115dp con #80000000 y padding 8dp, SUPERPUESTA al
+      borde de abajo del vídeo.
+    · Marco del banner de 60dp (#C9F0C5) debajo del vídeo (marco reservado,
+      sin anuncio real).
+
+  Ids: el código espera estos nombres. Salvo cabeceraPlayer (que en paisaje no
+  existe), son los mismos que en activity_player.xml, así que el Java no cambia.
+-->
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    android:keepScreenOn="true">
+
+    <!-- 1. CABECERA: atrás + título + servidores, superpuesta al vídeo -->
+    <LinearLayout
+        android:id="@+id/cabeceraPlayer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignTop="@id/zonaVideo"
+        android:elevation="4dp"
+        android:orientation="vertical"
+        android:padding="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageButton
+                android:id="@+id/btnAtrasPlayer"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_volver"
+                android:src="@drawable/ic_atras"
+                app:tint="#FFFFFF" />
+
+            <TextView
+                android:id="@+id/tvTituloPlayer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@android:color/white"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+        </LinearLayout>
+
+        <!-- Servidores: dentro de la cabecera, como en la spec de retrato -->
+        <LinearLayout
+            android:id="@+id/filaServidores"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingTop="2dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingEnd="8dp"
+                android:text="@string/player_servidores"
+                android:textColor="@android:color/white"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <HorizontalScrollView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/contenedorServidores"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+
+            </HorizontalScrollView>
+
+            <ImageButton
+                android:id="@+id/btnRefresh"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_refresh"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_refresh" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- 2. VÍDEO: 300dp pegado al borde superior -->
+    <FrameLayout
+        android:id="@+id/zonaVideo"
+        android:layout_width="match_parent"
+        android:layout_height="300dp"
+        android:layout_alignParentTop="true"
+        android:background="@android:color/black">
+
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/playerView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@android:color/black"
+            app:show_buffering="when_playing"
+            app:resize_mode="fit"
+            app:surface_type="texture_view"
+            app:use_controller="false" />
+
+        <WebView
+            android:id="@+id/webPlayable"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@android:color/black"
+            android:visibility="gone" />
+
+        <!-- Cargando, centrado -->
+        <ProgressBar
+            android:id="@+id/cargandoPlayer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:indeterminate="true"
+            android:indeterminateTint="@android:color/white"
+            android:visibility="gone" />
+
+        <!-- Controles centrados de 55dp, con PiP -->
+        <LinearLayout
+            android:id="@+id/controls"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:clickable="true"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <ImageButton
+                android:id="@+id/btnRewind"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_rewind"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_rewind" />
+
+            <ImageButton
+                android:id="@+id/btnPlayPause"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_play_pause"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_play" />
+
+            <ImageButton
+                android:id="@+id/btnForward"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_forward"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_forward" />
+
+            <ImageButton
+                android:id="@+id/btnVolume"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_volume"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_volume" />
+
+            <ImageButton
+                android:id="@+id/btnPip"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_pip"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_pip" />
+
+            <ImageButton
+                android:id="@+id/btnPantalla"
+                android:layout_width="55dp"
+                android:layout_height="55dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/player_pantalla"
+                android:padding="10dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_pantalla_completa" />
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/chipCalidad"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="10dp"
+            android:layout_marginEnd="10dp"
+            android:background="@color/pelis_scrim_strong"
+            android:paddingStart="12dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="6dp"
+            android:text="HD ▾"
+            android:textColor="@color/pelis_text"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <!-- 3+4. Parte de abajo del vídeo, apilada: primero la barra de progreso
+             (v7.34) y debajo la tira de canales de 115dp superpuesta al borde.
+             El contenedor mide wrap_content, asi que con la barra en gone ocupa
+             EXACTAMENTE los 115dp de antes: el reproductor de canales en directo
+             no se entera de que esto existe. -->
+        <!-- Barra de progreso: se arrastra hasta donde uno quiera (como en
+             Netflix). Empieza en gone: la muestra aplicarVisibilidadExtra()
+             solo cuando el contenido admite busqueda. v7.34.1: en los canales
+             en directo la comprobacion es explicita (isCurrentMediaItemLive),
+             porque los directos con DVR también publican duración. -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:id="@+id/filaProgreso"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#99012A33"
+                android:clickable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingTop="5dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="5dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/tvTiempoActual"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="42dp"
+                    android:text="0:00"
+                    android:textColor="@color/pelis_text"
+                    android:textSize="11sp" />
+
+                <SeekBar
+                    android:id="@+id/seekBar"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="1000"
+                    android:paddingStart="6dp"
+                    android:paddingEnd="6dp"
+                    android:progressDrawable="@drawable/seekbar_progress"
+                    android:splitTrack="false"
+                    android:thumb="@drawable/seekbar_thumb" />
+
+                <TextView
+                    android:id="@+id/tvTiempoTotal"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:minWidth="42dp"
+                    android:text="--:--"
+                    android:textColor="@color/pelis_text"
+                    android:textSize="11sp" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/tiraCanalesPlayer"
+                android:layout_width="match_parent"
+                android:layout_height="115dp"
+                android:background="#80000000"
+                android:clickable="true"
+                android:orientation="vertical"
+                android:padding="8dp"
+                android:visibility="visible">
+
+            <HorizontalScrollView
+                android:id="@+id/scrollCanalesPlayer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/contenedorCanalesPlayer"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+
+            </HorizontalScrollView>
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- 4. MARCO DEL BANNER debajo del vídeo (sin anuncio real) -->
+    <FrameLayout
+        android:id="@+id/adBannerContainer"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:layout_below="@id/zonaVideo"
+        android:background="#C9F0C5"
+        android:gravity="center" />
+
+</RelativeLayout>
