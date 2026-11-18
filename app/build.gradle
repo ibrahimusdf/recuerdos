@@ -24,8 +24,8 @@ android {
         applicationId "dza.fut.paipo"
         minSdk 30
         targetSdk 34
-        versionCode 94
-        versionName "7.39.3"
+        versionCode 95
+        versionName "7.39.4"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

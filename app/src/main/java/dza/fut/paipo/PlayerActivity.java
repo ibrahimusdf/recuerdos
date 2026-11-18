@@ -2114,6 +2114,11 @@ public class PlayerActivity extends AppCompatActivity {
                         // ganadora que llegue tarde se ignora (no se le cambia el canal al
                         // usuario mientras lo está viendo).
                         imagenConfirmada = true;
+                        // v7.39.4 — el arranque acabó: ya no hay nada que esperar.
+                        fuenteNativaEnMarcha = false;
+                        // …y si aun así quedara un embed viejo, se retira: nunca debe haber
+                        // un iframe encima de un vídeo que ya está en pantalla.
+                        if (embeddedEnVentana) retirarEmbedSiEstaba();
                         // v7.38.3 — si hay imagen, esta opción ya no está «fallida».
                         if (opcionActual >= 0) opcionesFallidas.remove(opcionActual);
                         // v7.37.17: el 200 no garantiza que sea el canal. El CDN de
@@ -2243,6 +2248,17 @@ public class PlayerActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
+        // v7.39.4 — LA «LÍNEA BLANCA». El WebView del embed es opaco y pinta su lienzo
+        // blanco por defecto: en el logcat del usuario se quedó encima del vídeo y el
+        // síntoma fue una franja blanca que solo desaparecía al girar la pantalla (el giro
+        // recrea la vista y ahí sí se retiraba). Con fondo transparente, aunque el embed
+        // llegue a estar encima, no tapa el vídeo con blanco.
+        try {
+            webViewFallback.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                webViewFallback.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            }
+        } catch (Throwable ignored) { }
         try { webViewFallback.addJavascriptInterface(new PuenteEmbed(), "AppPuente"); }
         catch (Throwable ignored) { }
         CookieManager.getInstance().setAcceptCookie(true);
@@ -2426,7 +2442,11 @@ public class PlayerActivity extends AppCompatActivity {
         if (base == null) return null;
         String avisar = (puente == null || puente.isEmpty()) ? ""
                 : ("if(t>1&&!avisado){avisado=true;try{window." + puente + ".videoVivo(t);}catch(e){}}");
-        String extra = "<script>var avisado=false;"
+        // v7.39.4 — fondo NEGRO en el marco: el blanco por defecto era la «línea blanca»
+        // que se veía cuando el embed quedaba encima del vídeo.
+        String extra = "<style>html,body{margin:0;padding:0;background:#000;overflow:hidden}"
+                + "iframe{border:0;width:100%;height:100%}</style>"
+                + "<script>var avisado=false;"
                 // si el vídeo de dentro se queda parado, se le da al play cada 4 s
                 + "setInterval(function(){try{var f=document.querySelector('iframe');"
                 + "var d=f&&f.contentDocument;if(!d)return;var v=d.querySelector('video');"
@@ -2609,6 +2629,7 @@ public class PlayerActivity extends AppCompatActivity {
         urlsEnCarrera.clear();
         descartesDeLaCarrera.limpiar();
         carreraEnMarcha = false;
+        fuenteNativaEnMarcha = false;      // v7.39.4
         imagenConfirmada = false;
         arranqueDeLaFuenteMs = 0L;
         if (servidoresProbados != null) servidoresProbados.clear();
@@ -2756,7 +2777,25 @@ public class PlayerActivity extends AppCompatActivity {
                     // lanza la carrera con TODAS las opciones (la de la API, la que dio
                     // glasbi, los recordados) y gana la que responda primero. Es lo que el
                     // usuario pedía y lo que evita los 63 s del logcat.
+                    // v7.39.4 — MEDIDO en el logcat del usuario (2026-11-18 16:01:51):
+                    //
+                    //   16:01:51.109  api: 4 opciones, 1 emitiendo · 1 confirmadas · 173 ms
+                    //   16:01:51.110  api: plan B ampliado a 1 opciones — a la carrera
+                    //   16:01:51.112  🏁 carrera: 1 opciones a la vez
+                    //   16:01:51.113  · en carrera: EMBEBIDA DLW → ordernap.net
+                    //
+                    // Sí, UNA: el embed del plan B ya había puesto `streamReady = true` y
+                    // `planCompletoDelCanal()` filtra por `utiles()`, que descarta los embeds
+                    // ya probados. Así que la proxada de la API —`/p/…/0.m3u8`, la que
+                    // responde 200 en 752 ms— NUNCA entró en la carrera del arranque, y el
+                    // canal se quedó 30 s con el iframe antes de que ExoPlayer la viera por
+                    // otro camino. «A la carrera» tiene que ser a la carrera DE VERDAD.
                     final boolean arrancaPorCarrera = !imagenConfirmada;
+                    if (arrancaPorCarrera) {
+                        for (DramaResolucion.Opcion o : ops) {
+                            if (o != null && o.url != null) urlsEnCarrera.remove(o.url);
+                        }
+                    }
                     log("api: plan B ampliado a " + ops.size() + " opciones"
                             + (arrancaPorCarrera ? " — a la carrera" : ""));
                     if (!arrancaPorCarrera) return;
@@ -2921,6 +2960,7 @@ public class PlayerActivity extends AppCompatActivity {
         webViewOcultoYaProbado = true;                    // no hay nada que capturar
         isResolving = false;
         streamReady = false;
+        fuenteNativaEnMarcha = false;     // v7.39.4: se paró el nativo, el embed puede pasar
         if (player != null) { try { player.stop(); } catch (Throwable ignored) { } }
         DramaResolucion.Opcion otra = siguienteOpcionUtil();
         if (otra != null) {
@@ -3185,9 +3225,46 @@ public class PlayerActivity extends AppCompatActivity {
 
     private void mostrarEmbedEnLaVentana(final String embed, final String uaDelEmbed,
                                          final String refererDelEmbed) {
+        // v7.39.4 — EL EMBED NO TAPA UN VÍDEO QUE ESTÁ ARRANCANDO.
+        // Medido (16:01:50.273 directa -> 16:01:50.963 embed encima -> 16:01:54.387 Ready):
+        // el iframe llegó 700 ms después de la ganadora de la carrera y se quedó encima del
+        // vídeo bueno durante 45 s. Aquí se le da al reproductor nativo el mismo margen que
+        // ya espera el vigilante del embed (15 s) antes de aceptar que no arranca.
+        if (fuenteNativaEnMarcha && !imagenConfirmada) {
+            final int miGeneracion = generacionDelCanal.actual();
+            log("⏳ el embed espera: hay una directa arrancando (" + embed + ")");
+            mainHandler.postDelayed(() -> {
+                if (miGeneracion != generacionDelCanal.actual() || isFinishing()) return;
+                // Si el nativo ya tiene imagen —o ya la perdió y no está en marcha— esto
+                // no cambia nada: solo se llama cuando de verdad no hay vídeo.
+                if (imagenConfirmada || embeddedEnVentana || hayFuentePuestaYSonando()) {
+                    log("✅ la directa arrancó: el embed ya no hace falta");
+                    return;
+                }
+                if (fuenteNativaEnMarcha) {
+                    log("⏹ la directa no arrancó en 15 s: ahora sí se pinta el embed");
+                    fuenteNativaEnMarcha = false;
+                }
+                mostrarEmbedEnLaVentana(embed, uaDelEmbed, refererDelEmbed);
+            }, ESPERA_AL_NATIVO_MS);
+            return;
+        }
         runOnUiThread(() -> {
             if (webViewFallback == null || embed == null || embed.isEmpty()) {
                 avisarSinStream();
+                return;
+            }
+            // v7.39.4 — y si mientras tanto llegó imagen nativa, no se pinta nada.
+            if (imagenConfirmada) {
+                log("✅ hay vídeo nativo: el embed (" + embed + ") no se pinta");
+                return;
+            }
+            // v7.39.4 — cinturón y tirantes: la espera ya se decidió arriba (fuera del hilo
+            // de la UI, para no leer la vista desde el hilo de fondo), pero entre aquella
+            // comprobación y esta puede haber llegado imagen. Si hay vídeo nativo, no se
+            // pinta el embed ni aunque sea el primer pintado.
+            if (imagenConfirmada) {
+                log("✅ hay vídeo nativo: el embed (" + embed + ") no se pinta");
                 return;
             }
             // v7.38.0 — el UA que manda el PROVEEDOR para este servidor, si lo hay.
@@ -3240,6 +3317,12 @@ public class PlayerActivity extends AppCompatActivity {
                 // cambiaba el servidor del canal NUEVO. Ahora muere con su generación.
                 if (miGeneracion != generacionDelCanal.actual()) return;
                 if (!embeddedEnVentana || isFinishing()) return;
+                // v7.39.4 — idem: si el vídeo nativo ya está en pantalla, fuera el embed.
+                if (imagenConfirmada) {
+                    log("🧽 el embed no hace falta: el vídeo nativo ya está en pantalla");
+                    retirarEmbedSiEstaba();
+                    return;
+                }
                 if (videoDeEmbedAvanza) {
                     log("plan B: hay imagen del embed (vídeo confirmado)");
                     return;
@@ -3273,6 +3356,32 @@ public class PlayerActivity extends AppCompatActivity {
         });
     }
 
+    /**
+     * v7.39.4 — <b>arranque en curso del reproductor nativo.</b>
+     *
+     * <p>Medido en el logcat del usuario (2026-11-18 16:01:50): la directa de la carrera
+     * entró a las 50.273 y el usuario ya veía `Buffering...`; 700 ms después (50.963) se
+     * pintó el embed del plan B ENCIMA. El vídeo de debajo arrancó igual (Ready a las
+     * 54.387) y el iframe se quedó ahí los 30 s del vigilante y 15 más: «línea blanca» que
+     * solo se quitaba al girar la pantalla.</p>
+     *
+     * <p>La regla que faltaba: mientras el reproductor nativo esté arrancando una fuente que
+     * la carrera ya validó, el embed <b>no se pinta</b>. No es que el embed esté mal: es
+     * que llega después y no tiene nada que arreglar.</p>
+     */
+    private volatile boolean fuenteNativaEnMarcha = false;
+
+    /** v7.39.4 — el aplazamiento del aviso se pide una sola vez por intento. */
+    private boolean avisarSinStreamAplazado = false;
+
+    /**
+     * v7.39.4 — margen que se le da a una directa antes de aceptar que no arranca.
+     *
+     * <p>15 s es el MISMO plazo que ya usaba el vigilante del embed para darse su primera
+     * oportunidad, así que no se alarga nada: solo se cambia el orden de quién manda.</p>
+     */
+    static final long ESPERA_AL_NATIVO_MS = 15000L;
+
     /** true si lo que se está viendo es el embed (plan B), no ExoPlayer. */
     private boolean embeddedEnVentana = false;
 
@@ -3287,6 +3396,15 @@ public class PlayerActivity extends AppCompatActivity {
         // en invalidarCanalAnterior), así que sale solo. Se deja la guarda explícita por
         // claridad: cambiar de servidor aquí movería el canal NUEVO.
         if (!embeddedEnVentana || isFinishing()) return;
+        // v7.39.4 — MEDIDO (16:02:20.988): «el embed no arranca ni con 30 s» mientras
+        // ExoPlayer llevaba 26 s reproduciendo debajo, y por eso el canal acabó con el
+        // aviso «sin nada más que probar» en pantalla mientras se veía el partido. Si el
+        // nativo tiene imagen, el embed sobra: se retira, no se cambia de servidor.
+        if (imagenConfirmada) {
+            log("🧽 el embed no hace falta: el vídeo nativo ya está en pantalla");
+            retirarEmbedSiEstaba();
+            return;
+        }
         if (peticionesDeVideo > 0 || videoDeEmbedAvanza) {
             log("plan B: el embed arrancó (" + peticionesDeVideo + " peticiones de vídeo)");
             return;
@@ -3599,6 +3717,30 @@ public class PlayerActivity extends AppCompatActivity {
         // v7.37.16: antes de rendirse, si el canal trajo un embed (ordernap /
         // quotarevival), se abre DENTRO de la ventana: está medido que así sí
         // reproduce beIN 1, 2, 5, 6 y News. Solo si no hay embed se avisa.
+        // v7.39.4 — «sin stream nativo» tiene que ser verdad. En el logcat del usuario la
+        // ganadora de la carrera ya estaba en el reproductor (Buffering) y aun así se pintó
+        // el embed encima. Si hay una directa arrancando, este método no pinta nada: solo
+        // se llega aquí cuando de verdad no hay nada puesto.
+        if (fuenteNativaEnMarcha && !imagenConfirmada) {
+            // Se aplaza UNA vez y con hora límite: si a los 15 s el nativo sigue sin imagen,
+            // la app no se queda muda — se da el arranque por perdido y se sigue el camino.
+            // (Un `return` seco aquí dejaría la pantalla en negro sin decir nada.)
+            log("⏳ sin stream nativo todavía, pero hay una directa arrancando: no se pinta embed");
+            if (!avisarSinStreamAplazado) {
+                avisarSinStreamAplazado = true;
+                mainHandler.postDelayed(() -> {
+                    avisarSinStreamAplazado = false;
+                    if (isFinishing() || imagenConfirmada) return;
+                    if (fuenteNativaEnMarcha) {
+                        log("⏹ la directa no dio imagen en " + (ESPERA_AL_NATIVO_MS / 1000)
+                                + " s: el arranque se da por perdido");
+                        fuenteNativaEnMarcha = false;
+                    }
+                    avisarSinStream();
+                }, ESPERA_AL_NATIVO_MS);
+            }
+            return;
+        }
         String elegida = DramaSesion.primeraEmbebida(streamOpcionesJson);
         if (elegida == null) elegida = DramaSesion.primeraOpcionNoMarcador(streamOpcionesJson);
         final String embebida = elegida;
@@ -3618,6 +3760,15 @@ public class PlayerActivity extends AppCompatActivity {
         }
         // v7.39.3 — ÚLTIMO RECURSO, ya sin nada que probar: si lo único que traía el canal
         // eran marcadores .LS., se dice la verdad en vez del genérico.
+        // v7.39.4 — y si aun así hay vídeo en pantalla, NO se dice «no se pudo cargar»: en el
+        // logcat del usuario este aviso salió dos veces (16:01:52.704 y 16:02:21.009) con el
+        // canal reproduciendo. Un aviso de fallo encima de un partido que se ve es peor que
+        // no avisar.
+        if (hayFuentePuestaYSonando() || imagenConfirmada) {
+            log("ℹ️ se llegó al final del plan, pero el canal YA está reproduciendo: no se avisa");
+            runOnUiThread(this::ocultarCargando);
+            return;
+        }
         if (hayMarcadorEnLaLista()) {
             log("🔒 sin nada más que probar y el canal solo trae marcadores .LS. "
                     + "-> lo resuelve el redirector del proveedor (glbr)");
@@ -4470,6 +4621,7 @@ public class PlayerActivity extends AppCompatActivity {
         // vídeo durante 60 s más. El usuario veía (y oía) un canal «que no arranca» con el
         // vídeo bueno sonando debajo. Retirar el embed es parte de «poner la directa».
         retirarEmbedSiEstaba();
+        fuenteNativaEnMarcha = true;      // v7.39.4: el embed no pinta hasta que esto acabe
         log("Reproduciendo stream m3u8 directo (sin WebView)");
         isResolving = false;
         // v7.39.0 — fuente nueva: todavía NO hay imagen. Y se apunta la hora, que es lo que

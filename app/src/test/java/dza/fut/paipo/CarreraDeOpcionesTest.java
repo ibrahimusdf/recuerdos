@@ -96,6 +96,18 @@ public class CarreraDeOpcionesTest {
                 "https://dramalive-api-08th.onrender.com/p/232425/live_tv_aljeriaelheddaf/0.m3u8")));
     }
 
+    /**
+     * v7.39.4 — un EMBED no es un manifiesto y no compite en la carrera.
+     *
+     * <p>Logcat del usuario, 2026-11-18 16:01: la carrera del arranque se quedó con
+     * {@code ordernap.net/e/b11wbtzmon53m} y gastó 1 444 ms en descartarlo («no es
+     * manifiesto») mientras la proxada buena respondía 200 en 752 ms.</p>
+     */
+    @Test public void losEmbedsNoEntranEnLaCarrera() {
+        assertFalse(CarreraDeOpciones.esCandidata(op("https://ordernap.net/e/b11wbtzmon53m")));
+        assertFalse(CarreraDeOpciones.esCandidata(op("https://quotarevival.net/e/vg4he6f2wmrj3")));
+    }
+
     // ─────────────────────────── el caso del logcat, entero ───────────────────────────
 
     /**

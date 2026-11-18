@@ -199,6 +199,13 @@ public final class CarreraDeOpciones {
         // no era el gasto: el plan B los ofrecía después como «servidor del canal».
         if (l.contains(".ls.") || l.contains("/.ls")) return false;
         if (DramaResolucion.esPaginaDePortal(o.url)) return false;
+        // v7.39.4 — un EMBED no puede ganar esta carrera, y probarlo cuesta caro.
+        // Medido (16:01:51.113 → 16:01:52.679): la carrera del arranque se quedó SOLO con
+        // `ordernap.net/e/b11wbtzmon53m` —un iframe, no un manifiesto— y gastó 1 444 ms en
+        // descubrir lo obvio mientras la proxada `/p/…/0.m3u8` (200 en 752 ms) ni siquiera
+        // entró. La carrera es para manifiestos: los embeds van por su propio camino (el
+        // WebView de la ventana), que es donde de verdad funcionan.
+        if (DramaResolucion.clasificar(o.url, false) == DramaResolucion.Tipo.EMBEBIDA) return false;
         if (esDashCifrado(o.url, 0)) return false;
         return true;
     }
