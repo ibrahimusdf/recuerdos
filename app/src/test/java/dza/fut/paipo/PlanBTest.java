@@ -2,6 +2,7 @@ package dza.fut.paipo;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -223,5 +224,72 @@ public class PlanBTest {
                 DramaResolucion.utiles(null, null), null, null, null));
         assertNull(DramaResolucion.siguiente(
                 Arrays.asList((DramaResolucion.Opcion) null), null, null, null));
+    }
+
+    // ───────── v7.38.5: el bucle que el logcat del móvil destapó ─────────
+
+    /**
+     * <b>El bug que mi v7.38.4 NO arreglaba.</b> Copiado del logcat real del usuario
+     * (2026-11-17 19:02:04 → 19:02:49, canal {@code live_tv_beinsport1}):
+     *
+     * <pre>
+     * 19:02:04 ✅ plan B: embed dentro de la ventana -> ordernap…
+     * 19:02:19 plan B: probando -> EMBEBIDA DLW -> ordernap…   ← EL MISMO
+     * 19:02:49 el embed no arranca ni con 30 s -> siguiente servidor
+     * </pre>
+     *
+     * Arreglar el {@code return null} no bastaba: el ATAJO de {@code resolverStreamEnSegundoPlano}
+     * llama a {@code mostrarEmbedEnLaVentana(String)}, que NO apuntaba la url en
+     * {@code servidoresProbados} ni fijaba {@code embedEnCurso}. A los 30 s el
+     * temporizador volvía a elegir la misma embed, para siempre. Aquí se fija la
+     * regla: lo que se pinta queda apuntado, y entonces el selector avanza.
+     */
+    @Test
+    public void elEmbedQueYaSePintoNoSeVuelveAElegir() {
+        List<DramaResolucion.Opcion> utiles = DramaResolucion.utiles(null,
+                "https://ordernap.net/e/z7iiiknxnuqjk -- redirect -;- "
+                + "https://quotarevival.net/e/yxtmusy4xj8tj -- redirect -;- "
+                + "http://primetv.cc.cd/beinfhd11/tracks-v1a1/mono.tbin.m3u8 -- Mozilla");
+        assertEquals("ordernap + primetv (quotarevival está medido como muerto)", 2, utiles.size());
+
+        // el ATAJO pintó ordernap; la 7.38.4 no lo apuntaba y volvía a salir
+        Set<String> probados = new LinkedHashSet<>();
+        DramaResolucion.Opcion primero = DramaResolucion.siguiente(utiles, probados, null, null);
+        assertEquals("https://ordernap.net/e/z7iiiknxnuqjk", primero.url);
+
+        // ESTO es lo que arregla la 7.38.5: al pintarlo, se apunta.
+        probados.add(primero.url);
+
+        DramaResolucion.Opcion segundo = DramaResolucion.siguiente(utiles, probados, null, null);
+        assertNotNull("tras 30 s tiene que haber OTRO, no el mismo", segundo);
+        assertNotEquals("no puede repetir ordernap", primero.url, segundo.url);
+        assertEquals("el siguiente es la directa de primetv",
+                "http://primetv.cc.cd/beinfhd11/tracks-v1a1/mono.tbin.m3u8", segundo.url);
+    }
+
+    /**
+     * El selector estático de {@code PlayerActivity} y {@link DramaResolucion#siguiente}
+     * tienen que dar lo mismo: son la misma decisión y antes eran dos implementaciones
+     * con reglas parecidas pero no iguales.
+     */
+    @Test
+    public void elSelectorDeLaActivityDelegaEnDramaResolucion() {
+        String backup = "https://ordernap.net/e/z7iiiknxnuqjk -- redirect -;- "
+                + "http://primetv.cc.cd/x/mono.m3u8 -- Mozilla";
+        Set<String> probados = new LinkedHashSet<>();
+
+        DramaResolucion.Opcion viaActivity =
+                PlayerActivity.siguienteOpcionUtil(null, backup, probados);
+        DramaResolucion.Opcion viaResolucion = DramaResolucion.siguiente(
+                DramaResolucion.utiles(null, backup), probados, null, null);
+
+        assertNotNull(viaActivity);
+        assertEquals(viaActivity.url, viaResolucion.url);
+
+        probados.add(viaActivity.url);
+        assertEquals(
+                PlayerActivity.siguienteOpcionUtil(null, backup, probados).url,
+                DramaResolucion.siguiente(
+                        DramaResolucion.utiles(null, backup), probados, null, null).url);
     }
 }

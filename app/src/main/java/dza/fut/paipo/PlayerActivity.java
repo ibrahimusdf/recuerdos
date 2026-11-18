@@ -191,6 +191,13 @@ public class PlayerActivity extends AppCompatActivity {
     private volatile String streamBackup = null;
 
     /** Servidores ya probados en este canal (para no repetir y no rendirse antes). */
+    /**
+     * v7.38.4 — al abrir un canal NUEVO, la lista de «ya probados» se vacía: si no,
+     * un canal que se había agotado antes llegaba a este con todo marcado y no se
+     * probaba ni un servidor.
+     */
+    private String canalCuyosServidoresSeEstanProbando = null;
+
     private final java.util.List<String> servidoresProbados =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     private volatile String calidadElegida;
@@ -471,7 +478,7 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     /**
-     * v7.38.4 — MARCA EL CANAL PARA LA CURA Y LA LANZA. Antes no existía: el campo
+     * v7.38.5 — MARCA EL CANAL PARA LA CURA Y LA LANZA. Antes no existía: el campo
      * {@code canalCurado} se declaraba y <b>nunca</b> recibía un valor distinto de
      * {@code null} (4 asignaciones en todo el fichero, las 4 a {@code null}), así
      * que toda la máquina de auto-curación quedaba inerte:
@@ -495,7 +502,7 @@ public class PlayerActivity extends AppCompatActivity {
      * queja del usuario). Aquí solo se lanza el headless, con el tope de ciclos
      * intacto y el cooldown de 100 s por canal.</p>
      */
-    private void lanzarCuraDelCanal(@Nullable String canal) {
+    private void lanzarCuraDelCanal(@androidx.annotation.Nullable String canal) {
         String pid = DramaSesion.idDeCanal(canal);
         if (pid == null || pid.isEmpty()) {
             log("cura: sin id_live (canal no viene de Drama) — no hay que curar nada");
@@ -708,27 +715,27 @@ public class PlayerActivity extends AppCompatActivity {
                             if (opcionesServidor.size() > 1) pintarChipsServidores();
                             mainHandler.removeCallbacks(curaReintentoRun);
                             canalCurado = null;
-                            // v7.38.4 — ESTA RAMA ERA UN CALLEJON SIN SALIDA, y es la
-                            // que el usuario vive a diario. Todas las demas (glbr fallo,
+                            mostrarErrorPlayer(R.string.player_error_relleno);
+                            // v7.38.5 — ESTA RAMA ERA UN CALLEJÓN SIN SALIDA, y es la
+                            // que el usuario vive a diario. Todas las demás (glbr falló,
                             // error de ExoPlayer, avisarSinStream) prueban el siguiente
                             // servidor o el embed; esta solo mostraba «Servidor no
-                            // disponible por ahora» y hacia return. Pero el clip de
-                            // relleno es una respuesta LEGITIMA del edge al POST desde
+                            // disponible por ahora» y hacía return. Pero el clip de
+                            // relleno es una respuesta LEGÍTIMA del edge al POST desde
                             // Java (docs/COMO_SESION_DRAMA.md, v3.2.12) y el embed del
-                            // MISMO canal si emite: era justo el caso donde mas falta
-                            // hacia el plan B.
-                            mostrarErrorPlayer(R.string.player_error_relleno);
+                            // MISMO canal sí emite: era justo el caso donde más falta
+                            // hacía el plan B.
                             DramaResolucion.Opcion planB = siguienteOpcionUtil();
                             if (planB != null) {
                                 log("relleno -> plan B: " + planB.etiqueta());
                                 urlIframeInicial = planB.url;
                                 // directo al marco: la carrera de 4 estrategias no puede
-                                // con un embed y son 20 s de negro (ver resolverStream...)
+                                // con un embed y son 20 s de negro (ver resolverStream…)
                                 mostrarEmbedEnLaVentana(planB);
                                 return;
                             }
-                            // Sin mas servidores que probar no se miente: se dice tal cual
-                            // y se deja la cura en segundo plano (v7.38.4 la reactiva).
+                            // Sin más servidores que probar no se miente: se dice tal cual
+                            // y se deja la cura en segundo plano (v7.38.5 la reactiva).
                             log("relleno y sin mas servidores utiles: " + DramaResolucion.utiles(
                                     streamUrl, streamBackup).size() + " en la lista");
                             showControls();
@@ -1646,15 +1653,6 @@ public class PlayerActivity extends AppCompatActivity {
             return;
         }
         setIntent(intent);
-        // v7.38.4 — CANAL NUEVO, SERVIDORES VIEJOS. La Activity es
-        // launchMode="singleTask": al cambiar de canal por intent se reutiliza la
-        // instancia. `leerOpcionesDeIntent` limpia los chips, pero NO el estado de
-        // Drama: `streamUrl`/`streamBackup` son el `live` del canal ANTERIOR y
-        // `servidoresProbados` guarda las urls que ya se intentaron para ese otro
-        // canal. Si la resolución del canal nuevo falla, `siguienteOpcionUtil()`
-        // devolvía un servidor del canal viejo con su UA y su Referer → negro (o, con
-        // suerte, otro canal). Se limpia aquí, en un solo sitio.
-        limpiarEstadoDrama();
         leerOpcionesDeIntent(intent);   // v3.2.66: chips del canal recien llegado
         String tituloNuevo = intent.getStringExtra("canal_titulo");
         if (tituloNuevo != null) { tituloCanalActual = tituloNuevo; pintarTituloPlayer(); }
@@ -1918,8 +1916,36 @@ public class PlayerActivity extends AppCompatActivity {
                     log("↩️ ExoPlayer fallo; plan B -> " + planB.etiqueta());
                     errorRefreshCount = MAX_REFRESH_RETRIES;   // no insistir con el m3u8 muerto
                     try { player.stop(); } catch (Throwable ignored) { }
-                    mostrarEmbedEnLaVentana(planB);
+                    if (planB.tipo == DramaResolucion.Tipo.EMBEBIDA) {
+                        mostrarEmbedEnLaVentana(planB);
+                    } else {
+                        // v7.38.4 — una DIRECTA con su UA y su Referer, no el UA de
+                        // escritorio de siempre: el CDN del proveedor contesta 403 si
+                        // no le llega el mismo UA con el que se pidió el enlace
+                        // (medido con primetv: 403 con los dos UA habituales).
+                        probarDirectaConSusCabeceras(planB);
+                    }
                     return;
+                }
+
+                // v7.38.4 — «considerar más servidores del mismo canal»: si a esta
+                // directa no le quedan reintentos, se prueban los demás servidores
+                // (otra directa, o el embed) en vez de quedarse en el mismo bucle.
+                if (errorRefreshCount >= MAX_REFRESH_RETRIES && !embeddedEnVentana) {
+                    DramaResolucion.Opcion otra = siguienteOpcionUtil();
+                    if (otra != null) {
+                        log("↪️ esta directa no da vídeo; se prueba otro servidor del canal -> "
+                                + otra.etiqueta());
+                        errorRefreshCount = 0;
+                        lastRefreshTime = System.currentTimeMillis();
+                        try { player.stop(); } catch (Throwable ignored) { }
+                        if (otra.tipo == DramaResolucion.Tipo.EMBEBIDA) {
+                            mostrarEmbedEnLaVentana(otra);
+                        } else {
+                            probarDirectaConSusCabeceras(otra);
+                        }
+                        return;
+                    }
                 }
 
                 if (!isNetworkAvailable()) {
@@ -2072,17 +2098,19 @@ public class PlayerActivity extends AppCompatActivity {
         Toast.makeText(getApplicationContext(), mensajeResId, Toast.LENGTH_SHORT).show();
     }
 
-    /**
-     * v7.38.4 — el canal se quedó sin servidores que probar. Antes este caso decía
-     * exactamente lo mismo que el relleno («Servidor no disponible por ahora»), así
-     * que el usuario no podía distinguir «prueba otra vez» de «aquí no hay nada».
-     */
-    private void mostrarAvisoSinMasServidores() {
-        mostrarErrorPlayer(R.string.player_sin_mas_servidores);
-    }
-
     private void ocultarErrorPlayer() {
         mensajeErrorPlayerResId = 0;
+    }
+
+    /**
+     * v7.38.5 — el canal se quedó sin servidores que probar. Antes esto se contaba con
+     * el mismo texto que el clip de relleno («Servidor no disponible por ahora»), que
+     * se lee como «la app está rota» y no dice lo que de verdad pasa ni que hay una
+     * cura trabajando en segundo plano.
+     */
+    private void mostrarAvisoSinMasServidores() {
+        Toast.makeText(getApplicationContext(),
+                R.string.player_sin_mas_servidores, Toast.LENGTH_LONG).show();
     }
 
     private void ocultarCargando() {
@@ -2338,6 +2366,30 @@ public class PlayerActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * v7.38.4 — reproduce una directa del canal con EL UA Y EL REFERER de esa opción.
+     *
+     * <p>El CDN del proveedor exige el UA con el que se pidió el enlace; con otro
+     * contesta 403 (medido con {@code primetv.cc.cd}: 403 con «Mozilla» y con el UA
+     * de móvil habitual). Por eso cada directa se prueba con lo suyo, no con el UA
+     * de escritorio global.</p>
+     */
+    private void probarDirectaConSusCabeceras(DramaResolucion.Opcion opcion) {
+        if (opcion == null || opcion.url == null) { avisarSinStream(); return; }
+        String ua = DramaResolucion.pareceUnUa(opcion.ua) ? opcion.ua : UA_DEL_EMBED;
+        streamCabeceras = "User-Agent: " + ua;
+        if (opcion.referer != null && !opcion.referer.isEmpty()) {
+            streamReferer = opcion.referer;
+            streamOrigin = origenDe(opcion.referer);
+            streamCabeceras = streamCabeceras + "\nReferer: " + opcion.referer;
+        } else {
+            streamReferer = null;
+            streamOrigin = null;
+        }
+        log("🎬 directa con su UA/Referer -> " + opcion.etiqueta());
+        resolverStreamDirecto(opcion.url, null, streamReferer, streamOrigin);
+    }
+
     /** La opción de Drama que se está mostrando como embed (su UA manda). */
     private DramaResolucion.Opcion embedEnCurso = null;
 
@@ -2345,23 +2397,27 @@ public class PlayerActivity extends AppCompatActivity {
      * Vuelve a la lista de servidores del canal y devuelve el siguiente que aún no
      * se haya probado: primero embebidas, luego directas. Sin repetir y sin
      * marcadores. Así no queda ningún servidor sin intentar.
-     *
-     * <p><b>v7.38.4 — EL BUG QUE DEJABA UN CANAL CON OCHO SERVIDORES A CERO.</b>
-     * Aquí había, dentro del bucle, un {@code if (o.url.equals(vista)) return null;}:
-     * al toparse con un servidor YA probado abortaba la lista entera en vez de
-     * saltarlo. La secuencia real de un canal de Drama es exactamente esa — el
-     * primero es una embebida, se abre, no arranca, se apunta en
-     * {@code servidoresProbados} y a la segunda vuelta {@code utiles.get(0)} es la
-     * misma → {@code null} → «se han probado TODOS los servidores» con siete sin
-     * abrir. La elección vive ahora en {@link DramaResolucion#siguiente} porque es
-     * pura y se prueba en JVM ({@code PlanBTest}).</p>
      */
     private DramaResolucion.Opcion siguienteOpcionUtil() {
+        return siguienteOpcionUtil(streamUrl, streamBackup, servidoresProbados);
+    }
+
+    /**
+     * v7.38.4 — elige el siguiente servidor del canal que aún no se probó: primero
+     * las embebidas (en orden) y después las directas. Puro y testeable.
+     *
+     * @param probados URLs ya intentadas en este canal (se saltan)
+     * @return la siguiente opción, o {@code null} si ya no queda ninguna
+     */
+    public static DramaResolucion.Opcion siguienteOpcionUtil(
+            String url, String backup,
+            java.util.Collection<String> probados) {
+        // v7.38.5 — la decisión vive en UN solo sitio (DramaResolucion.siguiente), que
+        // es pura y tiene sus propias pruebas (PlanBTest). Aquí solo se le pasa la
+        // lista del canal. Sin esto había dos selectores con reglas parecidas pero no
+        // iguales, y el bug del `return null` vivía en el tercero.
         return DramaResolucion.siguiente(
-                DramaResolucion.utiles(streamUrl, streamBackup),
-                servidoresProbados,
-                urlEnReproduccion,
-                embedEnCurso == null ? null : embedEnCurso.url);
+                DramaResolucion.utiles(url, backup), probados, null, null);
     }
 
     private void mostrarEmbedEnLaVentana(DramaResolucion.Opcion opcion) {
@@ -2421,6 +2477,12 @@ public class PlayerActivity extends AppCompatActivity {
             embeddedEnVentana = true;
             videoDeEmbedAvanza = false;
             peticionesDeVideo = 0;
+            // v7.38.4 — FALLO REAL del bucle: solo se marcaba como «probado» al pasar
+            // por el camino de arriba, así que el temporizador de 30 s volvía a poner
+            // EL MISMO embed una y otra vez (tu log: ordernap 19:02:04, 19:02:19,
+            // otra vez ordernap). Aquí se marca siempre, antes de nada.
+            if (!servidoresProbados.contains(embed)) servidoresProbados.add(embed);
+            segundaOportunidadDada = false;
             streamReady = true;          // hay imagen: no se dispara el aviso de «sin stream»
             isResolving = false;
             ocultarCargando();
@@ -2453,6 +2515,7 @@ public class PlayerActivity extends AppCompatActivity {
                     return;
                 }
                 log("plan B: el embed no arranca -> siguiente servidor");
+                if (!servidoresProbados.contains(elQueSePuso)) servidoresProbados.add(elQueSePuso);
                 DramaResolucion.Opcion siguiente = siguienteOpcionUtil();
                 if (siguiente != null) {
                     log("plan B: probando -> " + siguiente.etiqueta());
@@ -2479,9 +2542,16 @@ public class PlayerActivity extends AppCompatActivity {
             log("plan B: el embed arrancó (" + peticionesDeVideo + " peticiones de vídeo)");
             return;
         }
+        // v7.38.4 — antes de cambiar, una última mirada al vídeo (en tu log el embed
+        // confirmó imagen a los 15 s de este punto y la app seguía cambiando).
+        if (videoDeEmbedAvanza) {
+            log("plan B: hay imagen del embed (vídeo confirmado)");
+            return;
+        }
         log("plan B: el embed no arranca ni con 30 s -> siguiente servidor");
         DramaResolucion.Opcion siguiente = siguienteOpcionUtil();
         if (siguiente != null) {
+            log("plan B: probando -> " + siguiente.etiqueta());
             segundaOportunidadDada = false;
             mostrarEmbedEnLaVentana(siguiente);
         } else {
@@ -2708,34 +2778,6 @@ public class PlayerActivity extends AppCompatActivity {
 
     /** Avisa al usuario de que este enlace no da stream, en vez de mostrarle una web. */
     private void avisarSinStream() {
-        // v7.37.16: antes de rendirse, si el canal trajo un embed (ordernap /
-        // quotarevival), se abre DENTRO de la ventana: está medido que así sí
-        // reproduce beIN 1, 2, 5, 6 y News. Solo si no hay embed se avisa.
-        //
-        // v7.38.4 — ESTE BLOQUE IBA DESPUÉS DEL DE ABAJO y era una REGRESIÓN de la
-        // 7.38.3: el aviso nuevo del marcador .LS. salía con un `return` ANTES de
-        // intentar el embed. Como `streamDirecto` conserva el marcador de la fila
-        // (`dramalive://` → `u=http://.LS.V2…`) aunque el canal TENGA embeds que sí
-        // emiten, la 7.38.3 dejó de probarlos: se quedaba en el toast. Una versión
-        // que reproduce MENOS que la anterior. El aviso de marcador pasa a ser el
-        // último recurso, después de haber probado lo que queda.
-        String elegida = DramaSesion.primeraEmbebida(streamOpcionesJson);
-        if (elegida == null) elegida = DramaSesion.primeraOpcionNoMarcador(streamOpcionesJson);
-        final String embebida = elegida;
-        if (embebida != null && !embeddedEnVentana && !isFinishing()) {
-            log("↩️ sin stream nativo; se prueba el embed en la ventana -> " + embebida);
-            mostrarEmbedEnLaVentana(embebida);
-            return;
-        }
-        // v7.38.4: y antes del aviso, cualquier servidor del backup que no se haya
-        // intentado todavía (el bug del `return null` hacía que casi nunca se llegara
-        // aquí con opciones vivas).
-        DramaResolucion.Opcion siguiente = siguienteOpcionUtil();
-        if (siguiente != null && !isFinishing()) {
-            log("↩️ sin stream nativo; queda un servidor por probar -> " + siguiente.etiqueta());
-            mostrarEmbedEnLaVentana(siguiente);
-            return;
-        }
         // v7.38.3 — marcador .LS.: el que resuelve es el proveedor, no el WebView.
         if (esMarcadorLs(streamDirecto) || esMarcadorLs(urlIframeInicial)) {
             log("🔒 canal con marcador .LS.: lo resuelve el redirector del proveedor "
@@ -2749,6 +2791,17 @@ public class PlayerActivity extends AppCompatActivity {
                             Toast.LENGTH_LONG).show();
                 } catch (Throwable ignored) { }
             });
+            return;
+        }
+        // v7.37.16: antes de rendirse, si el canal trajo un embed (ordernap /
+        // quotarevival), se abre DENTRO de la ventana: está medido que así sí
+        // reproduce beIN 1, 2, 5, 6 y News. Solo si no hay embed se avisa.
+        String elegida = DramaSesion.primeraEmbebida(streamOpcionesJson);
+        if (elegida == null) elegida = DramaSesion.primeraOpcionNoMarcador(streamOpcionesJson);
+        final String embebida = elegida;
+        if (embebida != null && !embeddedEnVentana && !isFinishing()) {
+            log("↩️ sin stream nativo; se prueba el embed en la ventana -> " + embebida);
+            mostrarEmbedEnLaVentana(embebida);
             return;
         }
         runOnUiThread(() -> {
@@ -3167,34 +3220,6 @@ public class PlayerActivity extends AppCompatActivity {
     // NO: la opcion que agota sus reintentos queda marcada con una ✕ y el
     // usuario elige otra tocando su chip.
 
-    /**
-     * v7.38.4 — borra TODO lo que pertenece al canal anterior antes de abrir otro.
-     * La Activity es {@code singleTask}, así que sin esto el plan B podía sacar un
-     * servidor del canal de antes (con su UA y su Referer, que solo sirven para el
-     * otro) y el reproductor se quedaba en negro sin decir por qué.
-     */
-    private void limpiarEstadoDrama() {
-        streamUrl = null;
-        streamBackup = null;
-        streamOpcionesJson = null;
-        embedEnCurso = null;
-        playlistCazado = null;
-        playlistCazadoUa = null;
-        playlistCazadoReferer = null;
-        yaSeHizoNativo = false;
-        segundaOportunidadDada = false;
-        peticionesDeVideo = 0;
-        marcadorForzado = null;
-        agenteForzado = null;
-        calidadElegida = null;
-        if (servidoresProbados != null) servidoresProbados.clear();
-        if (canalCurado != null) {
-            mainHandler.removeCallbacks(curaReintentoRun);
-            canalCurado = null;
-            curaCiclos = 0;
-        }
-    }
-
     private void leerOpcionesDeIntent(Intent intent) {
         opcionesServidor.clear();
         opcionesFallidas.clear();
@@ -3271,6 +3296,11 @@ public class PlayerActivity extends AppCompatActivity {
         // entra al reproductor (y no «vuelve a la lista») y con qué fuente arranca.
         log("\u25B6\uFE0F canal abierto · servidor " + (idx + 1) + "/" + opcionesServidor.size()
                 + " · " + opcionesServidor.get(idx)[0] + " · " + url);
+        // v7.38.4 — servidores probados del canal anterior no valen para este.
+        if (!url.equals(canalCuyosServidoresSeEstanProbando)) {
+            servidoresProbados.clear();
+            canalCuyosServidoresSeEstanProbando = url;
+        }
         pintarChipsServidores();
         log("\uD83D\uDD01 Servidor elegido a mano: " + opcionesServidor.get(idx)[0]);
         isResolving = false;
@@ -3585,6 +3615,8 @@ public class PlayerActivity extends AppCompatActivity {
         mostrarCargando();
         log("Reproduciendo stream m3u8 directo (sin WebView)");
         isResolving = false;
+        // v7.38.4 — esta directa también cuenta como servidor probado del canal.
+        if (!servidoresProbados.contains(url)) servidoresProbados.add(url);
         mainHandler.post(() -> {
             if (!asegurarPlayer()) return;
             Map<String, String> headers = new HashMap<>();

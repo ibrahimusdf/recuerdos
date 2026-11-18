@@ -1692,12 +1692,32 @@ public final class DramaSesion {
         }
     }
 
-    /** v3.2.13: id_live crudo (decodificado) de una fila dramalive://play?id_live=…; null si no. */
+    /**
+     * v3.2.13: id_live crudo (decodificado) de una fila dramalive://play?id_live=…;
+     * null si no lo lleva.
+     *
+     * <p><b>v7.38.5 — el segundo toque de un canal ya curado se quedaba sin id.</b>
+     * {@link FuenteCanales#fijarUrlResuelta} sustituye el {@code dramalive://…} de la
+     * rejilla por la url https real, y ese texto no trae {@code id_live=}. La fila
+     * sobrevive porque {@code idFila()} mira también el {@code tvg-id} del EXTINF —
+     * pero esta función no, así que a partir del segundo toque
+     * {@code lanzarCuraDelCanal()} recibía null y la cura no se lanzaba NUNCA. Es
+     * decir: los canales que alguna vez se vieron eran justo los que no se podían
+     * curar. Aquí se acepta cualquier texto que lleve {@code id_live=} (la fila
+     * entera, EXTINF incluido) y, si no, se acepta un {@code tvg-id="…"}.
+     */
     @Nullable
     public static String idDeCanal(@Nullable String canalUrl) {
         if (canalUrl == null) return null;
         int i = canalUrl.indexOf("id_live=");
-        if (i < 0) return null;
+        if (i < 0) {
+            // Sin id_live:// en la url: la fila puede venir ya curada a https.
+            java.util.regex.Matcher m =
+                    java.util.regex.Pattern.compile("tvg-id=\"([^\"]+)\"").matcher(canalUrl);
+            if (!m.find()) return null;
+            String tv = m.group(1).trim();
+            return tv.isEmpty() ? null : tv;
+        }
         int j = canalUrl.indexOf('&', i);
         String id = canalUrl.substring(i + 8, j < 0 ? canalUrl.length() : j);
         if (id.isEmpty()) return null;
