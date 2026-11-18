@@ -1985,6 +1985,32 @@ public class PlayerActivity extends AppCompatActivity {
                 // que había dado 403 a los 175 ms).
                 if (cortarSiLaFuenteEstaMuerta(generacionDelCanal.actual())) return;
 
+                // v7.39.5 — PRIMERO UN REINTENTO DE LA MISMA URL. Medido (2026-11-18):
+                //
+                //   16:41:02.836 Buffering...  → 16:41:14.507 ❌ 504  (canal nuevo, negro)
+                //   16:41:24.490 Buffering...  → 16:41:24.715 ❌ 403  → 16:41:26.077 ✅ Ready
+                //   16:41:38.988 Buffering...  → (403 de ruido) → 16:41:40.101 ✅ Ready
+                //
+                // La proxada de Render devuelve 504 mientras despierta (misma causa que el
+                // `TIEMPO_DESPERTAR_MS` del API) y los CDN de estos canales tiran un 403 a
+                // la primera petición para luego servir el playlist sin problema. Nada de
+                // eso significa «canal muerto»: significa «reintenta». Saltar al plan B a la
+                // primera costaba el canal entero.
+                if (errorRefreshCount < REINTENTOS_DE_ARRANQUE && !embeddedEnVentana
+                        && urlEnReproduccion != null
+                        && !descartesDeLaCarrera.estaMuerta(urlEnReproduccion)) {
+                    errorRefreshCount++;
+                    log("↻ el arranque falló (" + error.getErrorCodeName() + "); reintento "
+                            + errorRefreshCount + "/" + REINTENTOS_DE_ARRANQUE
+                            + " de la misma fuente: " + urlEnReproduccion);
+                    mainHandler.postDelayed(() -> {
+                        if (isFinishing() || imagenConfirmada) return;
+                        if (urlEnReproduccion == null) return;
+                        try { player.prepare(); player.play(); } catch (Throwable ignored) { }
+                    }, 1200L * errorRefreshCount);
+                    return;
+                }
+
                 DramaResolucion.Opcion planB = siguienteOpcionUtil();
                 boolean planBEsElMismoStream = planB != null && urlEnReproduccion != null
                         && planB.url.equals(urlEnReproduccion);
@@ -2630,6 +2656,7 @@ public class PlayerActivity extends AppCompatActivity {
         descartesDeLaCarrera.limpiar();
         carreraEnMarcha = false;
         fuenteNativaEnMarcha = false;      // v7.39.4
+        avisosSinStreamSeguidos = 0;       // v7.39.5
         imagenConfirmada = false;
         arranqueDeLaFuenteMs = 0L;
         if (servidoresProbados != null) servidoresProbados.clear();
@@ -3375,6 +3402,27 @@ public class PlayerActivity extends AppCompatActivity {
     private boolean avisarSinStreamAplazado = false;
 
     /**
+     * v7.39.5 — cuántas veces seguidas {@link #avisarSinStream()} ha mandado algo a probar
+     * sin que se pusiera una fuente nueva en medio. Es el cortafuegos del bucle infinito
+     * medido en el logcat: 4 238 vueltas en 3 s. Se reinicia cada vez que se pone una
+     * fuente o se cambia de canal.
+     */
+    private int avisosSinStreamSeguidos = 0;
+
+    /** v7.39.5 — tope de vueltas seguidas del aviso. Un canal trae 3-8 servidores. */
+    static final int MAX_AVISOS_SEGUIDOS = 8;
+
+    /**
+     * v7.39.5 — reintentos de la MISMA url antes de dar el arranque por fallido.
+     *
+     * <p>Con los números del logcat: la proxada de Render contesta 504 a los 12 s y el
+     * segundo intento ya da imagen; los CDN de los canales nuevos dan un 403 de ruido y
+     * a la siguiente sirven el playlist. Dos reintentos con espera creciente cubren los dos
+     * casos sin gastar el canal.</p>
+     */
+    static final int REINTENTOS_DE_ARRANQUE = 2;
+
+    /**
      * v7.39.4 — margen que se le da a una directa antes de aceptar que no arranca.
      *
      * <p>15 s es el MISMO plazo que ya usaba el vigilante del embed para darse su primera
@@ -3416,6 +3464,14 @@ public class PlayerActivity extends AppCompatActivity {
             return;
         }
         log("plan B: el embed no arranca ni con 30 s -> siguiente servidor");
+        // v7.39.5 — y ESTE es el punto donde toca apuntar el fallo del canal. Medido en el
+        // logcat: los CDN de estos canales (`edgenextcdn` tx010/tx012) devuelven 403 a
+        // ExoPlayer y un `.ts` «TS not aligned» en el embed, y aun así eran lo primero que
+        // se probaba en cada visita, porque solo se apunta lo que SÍ funciona y lo que
+        // falla no se apunta nunca: 40+ s en negro cada vez.
+        // Conservador a propósito: solo se apunta si esa url no tiene ningún éxito y el
+        // canal tiene alguna alternativa. Así no se puede vaciar el plan de un canal.
+        apuntarFalloDelCanal(embedEnCurso == null ? null : embedEnCurso.url);
         DramaResolucion.Opcion siguiente = siguienteOpcionUtil();
         if (siguiente != null) {
             log("plan B: probando -> " + siguiente.etiqueta());
@@ -3424,6 +3480,29 @@ public class PlayerActivity extends AppCompatActivity {
         } else {
             log("plan B: se han probado TODOS los servidores del canal");
             avisarSinStream();
+        }
+    }
+
+    /**
+     * v7.39.5 — apunta que ESTE servidor del canal no reprodujo.
+     *
+     * <p>Es lo contrario de {@code apuntarExito}, y faltaba: la memoria del canal solo
+     * sabía lo bueno. Con los canales nuevos de Drama eso significaba empezar siempre por
+     * el CDN que da 403.</p>
+     *
+     * <p>Se niega a apuntar si la url ya tiene algún éxito (el orden la pondría al final
+     * sin necesidad) o si es la última opción del canal: mejor reintentar lo único que hay
+     * que quedarse sin nada.</p>
+     */
+    private void apuntarFalloDelCanal(@androidx.annotation.Nullable String url) {
+        if (url == null || url.isEmpty() || canalActual == null) return;
+        try {
+            java.util.List<DramaResolucion.Opcion> plan = planCompletoDelCanal();
+            if (plan.size() <= 1) return;                  // es lo único que hay: no se toca
+            ServidoresDelCanal.apuntarFallo(this, ServidoresDelCanal.claveDeCanal(canalActual), url);
+            log("📉 apuntado el fallo de este servidor: " + url);
+        } catch (Throwable t) {
+            log("no se pudo apuntar el fallo: " + t.getClass().getSimpleName());
         }
     }
 
@@ -3463,9 +3542,16 @@ public class PlayerActivity extends AppCompatActivity {
         apunteServidorRun = () -> {
             if (isFinishing() || avisoDeStreamYaVisto) return;
             if (!sigueVigente(miGeneracion)) return;
-            if (!streamReady) return;
+            // v7.39.5 — LA PROXADA DEL CANAL SIEMPRE SE APUNTA, aunque ExoPlayer no llegue
+            // a READY. Medido (2026-11-18 16:41:02 → 16:41:14): el primer canal nuevo se
+            // quedó en negro con «Error de red HTTP: Response code: 504» — Render dormido,
+            // no un canal muerto — y como nunca hubo READY no se apuntó NADA, así que la
+            // próxima vez se volvería a empezar por lo lento.
+            boolean esLaProxada = CarreraDeOpciones.esDelProxy(url);
+            if (!streamReady && !esLaProxada) return;
             ServidoresDelCanal.apuntarExito(PlayerActivity.this, llave, url, uaFinal, refFinal);
-            log("💾 servidor recordado para este canal: " + url);
+            log("💾 servidor recordado para este canal"
+                    + (streamReady ? ": " : " (arranque de la proxada): ") + url);
         };
         mainHandler.postDelayed(apunteServidorRun, 3000);
     }
@@ -3682,6 +3768,22 @@ public class PlayerActivity extends AppCompatActivity {
     /** Avisa al usuario de que este enlace no da stream, en vez de mostrarle una web. */
     private void avisarSinStream() {
         // ═══════════════════════════════════════════════════════════════════════════
+        // v7.39.5 — BUCLE INFINITO. Medido en el logcat del usuario (2026-11-18):
+        // 4 238 repeticiones de esta misma línea en TRES SEGUNDOS (891 en 16:40:21,
+        // 2 067 en :22, 1 280 en :23), todas en el hilo de UI, con la app congelada:
+        //
+        //   ↩️ sin stream nativo; se prueba el embed en la ventana -> …/androstreamlivebs4.m3u8
+        //   ↩️ sin stream nativo; se prueba el embed en la ventana -> …/androstreamlivebs4.m3u8
+        //   … 4 238 veces …
+        //
+        // La cadena era: esta función elegía `primeraEmbebida()` SIN mirar qué se había
+        // probado ya → `probarServidor()` → ese servidor es un CDN de otro canal y falla →
+        // `avisarSinStream()` → la MISMA elegida → y así para siempre. Ni siquiera era una
+        // url de este canal: la memoria del canal anterior había quedado viva.
+        //
+        // Dos cortes: (1) no se elige nada ya probado; (2) un guardián que impide que este
+        // método se llame más de N veces seguidas sin que se ponga una fuente nueva.
+        // ═══════════════════════════════════════════════════════════════════════════
         // v7.39.3 — AQUÍ HABÍA UNA REGRESIÓN MÍA, Y ERA GRAVE.
         //
         // La v7.39.2 puso `hayMarcadorEnLaLista()` en la PRIMERA línea de este método.
@@ -3741,10 +3843,39 @@ public class PlayerActivity extends AppCompatActivity {
             }
             return;
         }
-        String elegida = DramaSesion.primeraEmbebida(streamOpcionesJson);
-        if (elegida == null) elegida = DramaSesion.primeraOpcionNoMarcador(streamOpcionesJson);
+        // v7.39.5 — SE ELIGE LO QUE NO SE HA PROBADO. Antes se preguntaba «la primera
+        // embebida del canal» sin mirar `servidoresProbados`, y si esa fallaba se volvía
+        // aquí y se elegía la misma: bucle infinito (medido: 4 238 vueltas en 3 s). Y
+        // estaba eligiendo una url que ni era de este canal — el resto de la memoria del
+        // canal anterior seguía viva. Ahora se filtra: ni probada, ni de otro canal, ni
+        // marcador.
+        String elegida = null;
+        for (DramaResolucion.Opcion o : DramaResolucion.utiles(streamUrl, streamBackup)) {
+            if (servidoresProbados.contains(o.url)) continue;
+            if (esMarcadorLs(o.url) || DramaResolucion.esMarcadorSinClasificar(o.url)) continue;
+            if (DramaResolucion.esPaginaDePortal(o.url)) continue;
+            elegida = o.url;
+            break;
+        }
         final String embebida = elegida;
+        // v7.39.5 — el guardián. Cada vez que este método manda algo a probar, cuenta. Si
+        // vuelve sin que se haya puesto una fuente nueva, es señal de que está dando vueltas.
+        if (avisosSinStreamSeguidos >= MAX_AVISOS_SEGUIDOS) {
+            log("🛑 avisarSinStream " + avisosSinStreamSeguidos
+                    + " veces seguidas sin avanzar: se corta el bucle y se avisa");
+            avisosSinStreamSeguidos = 0;
+            runOnUiThread(() -> {
+                ocultarCargando();
+                showControls();
+                try {
+                    Toast.makeText(this, "No se pudo cargar este enlace. Prueba otra opción del canal.",
+                            Toast.LENGTH_LONG).show();
+                } catch (Throwable ignored) { }
+            });
+            return;
+        }
         if (embebida != null && !embeddedEnVentana && !isFinishing()) {
+            avisosSinStreamSeguidos++;      // v7.39.5
             log("↩️ sin stream nativo; se prueba el embed en la ventana -> " + embebida);
             // v7.38.6: por el despachador — si resultó ser una DIRECTA, a ExoPlayer.
             probarServidor(buscarOpcion(embebida));
@@ -3754,6 +3885,7 @@ public class PlayerActivity extends AppCompatActivity {
         // probado (antes se rendía aquí sin mirarlos).
         DramaResolucion.Opcion queda = siguienteOpcionUtil();
         if (queda != null && !isFinishing()) {
+            avisosSinStreamSeguidos++;      // v7.39.5
             log("↩️ sin stream nativo; queda un servidor por probar -> " + queda.etiqueta());
             probarServidor(queda);
             return;
@@ -4621,6 +4753,7 @@ public class PlayerActivity extends AppCompatActivity {
         // vídeo durante 60 s más. El usuario veía (y oía) un canal «que no arranca» con el
         // vídeo bueno sonando debajo. Retirar el embed es parte de «poner la directa».
         retirarEmbedSiEstaba();
+        avisosSinStreamSeguidos = 0;      // v7.39.5: hay fuente nueva, el contador vuelve a cero
         fuenteNativaEnMarcha = true;      // v7.39.4: el embed no pinta hasta que esto acabe
         log("Reproduciendo stream m3u8 directo (sin WebView)");
         isResolving = false;

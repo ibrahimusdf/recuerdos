@@ -423,6 +423,14 @@ public final class DramaResolucion {
     public static boolean esPlaylist(@Nullable String u) {
         if (u == null) return false;
         String l = u.toLowerCase(Locale.ROOT);
+        // v7.39.5 — UN .ts/.JPG NO ES UN STREAM DE ARRANQUE: es un segmento o un cartel.
+        // Medido en el logcat (2026-11-18 16:42): un `.ts` de otro canal llegó a la ventana
+        // como si fuera un embed («TS not aligned»), y de ahí al bucle de avisos. Aquí se
+        // corta en el origen. Antes un `.ts` caía en «PAGINA» (por contener «tracks-v1»…)
+        // y se mandaba al WebView.
+        if (l.contains(".ts") || l.contains(".jpg") || l.contains(".jpeg")
+                || l.contains(".png") || l.contains(".gif") || l.contains(".webp")
+                || l.contains("/poster") || l.contains("/sprite")) return false;
         return l.contains(".m3u8") || l.contains(".mpd") || l.contains(".mp4")
                 || l.contains(".m4v") || l.contains("/hls/") || l.contains("tracks-v1");
     }
