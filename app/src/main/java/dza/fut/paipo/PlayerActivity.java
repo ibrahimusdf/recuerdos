@@ -606,6 +606,12 @@ public class PlayerActivity extends AppCompatActivity {
                 String[] ra = null;
                 String err = null;
                 final long t0N = System.currentTimeMillis();
+                // v7.38.9 — la API arranca en paralelo, ANTES de resolver nada y sin
+                // que el canal la espere. Así (a) no retrasa el arranque y (b) sus
+                // opciones existen también cuando resolverVivo falla, que es justo
+                // cuando más falta hacen. Antes solo se consultaba DENTRO del camino
+                // feliz de glasbi: si ese fallaba, la app nunca preguntaba nada.
+                pedirOpcionesEnSegundoPlano(canal);
                 try {
                     String ses = FuenteCanales.sesionDrama(PlayerActivity.this);
                     log("post glbr: " + DramaSesion.diagnosticoGlbr(ses)); // v3.2.12
@@ -640,11 +646,10 @@ public class PlayerActivity extends AppCompatActivity {
                             // Referer. Antes solo se guardaba la lista «cocinada», que
                             // tiraba los que no eran «la primera opción no marcador».
                             cargarServidoresDelCanal(canal, ses);
-                            // v7.38.8 — el acelerador: qué opciones de ESTE canal emiten,
-                            // según la API de la cadena. Va aquí porque ya estamos en el
-                            // hilo de fondo y ya se sabe el id_live. Si no hay API, o
-                            // duerme, esto devuelve null y no cambia nada.
-                            opcionesDeLaApi = pedirOpcionesALaApi(canal);
+                            // v7.38.9 — la API se consulta AL MARGEN (ver
+                            // pedirOpcionesEnSegundoPlano): antes se llamaba aquí, en
+                            // serie, y en beIN 5 la API tarda 13 s en una sola opción.
+                            // Eso retrasaba el arranque del canal sin necesidad.
                             if (DramaSesion.siYaEsStream(vv.url)) {
                                 ra = new String[]{ vv.url, vv.ua };
                                 long tPost = System.currentTimeMillis() - t0N;
@@ -2423,11 +2428,45 @@ public class PlayerActivity extends AppCompatActivity {
     private java.util.List<DramaResolucion.Opcion> opcionesDeLaApi = null;
 
     /**
+     * v7.38.9 — lanza la consulta a la API <b>al margen</b> y sigue.
+     *
+     * <p>Dos razones, las dos medidas:</p>
+     * <ol>
+     *   <li><b>No puede bloquear.</b> En beIN 5 la API tarda 13,3 s en una sola opción
+     *       (timeout interno suyo). Con la consulta en serie, abrir el canal costaba
+     *       eso de más. Ahora el canal arranca ya y la API llega cuando llega.</li>
+     *   <li><b>Debe existir cuando glasbi falla.</b> Antes la llamada estaba dentro del
+     *       camino feliz de {@code resolverVivo}; si ese devolvía null, la app no
+     *       preguntaba nunca, que es exactamente el caso de «los demás canales no
+     *       abren».</li>
+     * </ol>
+     *
+     * <p>Si llega tarde, no se pierde: el resultado se guarda en
+     * {@link #opcionesDeLaApi} y lo usa el siguiente intento del plan B (el usuario pulsa
+     * reintentar, otro servidor falla, la cura reintenta…).</p>
+     */
+    private void pedirOpcionesEnSegundoPlano(String canalDrama) {
+        final String canal = canalDrama;
+        try {
+            executorService.execute(new Runnable() {
+                @Override public void run() {
+                    java.util.List<DramaResolucion.Opcion> ops = pedirOpcionesALaApi(canal);
+                    if (ops == null || ops.isEmpty()) return;
+                    opcionesDeLaApi = ops;
+                    log("api: plan B ampliado a " + ops.size() + " opciones (llego tarde o temprano, da igual)");
+                }
+            });
+        } catch (Throwable t) {
+            log("api: no se pudo lanzar la consulta (" + t.getClass().getSimpleName() + ")");
+        }
+    }
+
+    /**
      * v7.38.8 — pregunta a la API de la cadena qué opciones de este canal emiten.
      *
-     * <p>Corre SIEMPRE en el hilo de fondo del arranque (nunca en UI). Nunca lanza y
-     * nunca es obligatorio: si no hay base configurada, o la API duerme, o contesta
-     * algo raro, devuelve null y el plan B sigue con lo que ya tenía.</p>
+     * <p>Corre SIEMPRE en un hilo de fondo (nunca en UI). Nunca lanza y nunca es
+     * obligatorio: si no hay base configurada, o la API duerme, o contesta algo raro,
+     * devuelve null y el plan B sigue con lo que ya tenía.</p>
      *
      * @return las opciones para el plan B, o null si no hay nada que aportar
      */
@@ -2455,7 +2494,8 @@ public class PlayerActivity extends AppCompatActivity {
             java.util.List<DramaResolucion.Opcion> ops =
                     ApiDrama.aOpciones(base, codigo.trim(), idLive, o);
             log("api: " + o.opciones.size() + " opciones, " + o.emitiendo + " emitiendo · "
-                    + ops.size() + " utiles para el plan B · " + ms + " ms");
+                    + o.confirmadas().size() + " confirmadas · "
+                    + ops.size() + " para el plan B · " + ms + " ms");
             for (DramaResolucion.Opcion x : ops) log("   · API " + x.etiqueta());
             return ops.isEmpty() ? null : ops;
         } catch (Throwable t) {
@@ -2463,6 +2503,20 @@ public class PlayerActivity extends AppCompatActivity {
             return null;
         }
     }
+
+    /** La opción de Drama que se está mostrando como embed (su UA manda). */
+    private DramaResolucion.Opcion embedEnCurso = null;
+
+    /**
+     * v7.38.8 — lo que la API de la cadena dijo de ESTE canal, ya convertido a opciones
+     * del plan B: primero la playlist proxada ({@code /p/…}, que ExoPlayer abre nativo)
+     * y detrás la página original de cada opción que emite.
+     *
+     * <p>Se rellena en el hilo de fondo del arranque de canal, antes de que el plan B
+     * tenga que elegir. Si queda vacía es que no hay API configurada o no contestó, y
+     * todo funciona como en la v7.38.7.</p>
+     */
+    private java.util.List<DramaResolucion.Opcion> opcionesDeLaApi = null;
 
     /**
      * Vuelve a la lista de servidores del canal y devuelve el siguiente que aún no

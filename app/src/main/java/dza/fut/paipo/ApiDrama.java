@@ -15,6 +15,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * v7.38.8 — <b>EL MISMO TRUCO QUE LA API DE DRAMA, DENTRO DE LA APP.</b>
@@ -62,11 +63,19 @@ final class ApiDrama {
     private static final String TAG = "BLABONGO_DEBUG";
 
     /**
-     * Tiempo máximo de la consulta. Corto a propósito: esto es un acelerador, y un
-     * arranque de canal no puede quedarse esperando a un tercero. Con 2,5 s el plan B
-     * local arranca prácticamente igual que sin API.
+     * Tiempo máximo de la consulta.
+     *
+     * <p><b>Por qué 12 s y no 2,5 s.</b> La v7.38.8 usaba 2,5 s para no frenar el
+     * arranque. Medido el 2026-11-18: {@code /opciones} de beIN 5 tarda 13,3 s en UNA
+     * sola opción (timeout interno de la API contra {@code rap8.rapidbackend.shop}) y
+     * beIN 2 otros 13,1 s. Con 2,5 s la consulta caducaba SIEMPRE en esos canales y el
+     * plan B se quedaba sin las opciones buenas — el canal en negro.</p>
+     *
+     * <p>Ahora no frena nada porque ya no está en el camino crítico: se lanza en paralelo
+     * (ver {@code PlayerActivity.pedirOpcionesEnSegundoPlano}). Como nadie la espera,
+     * vale la pena dejar que llegue.</p>
      */
-    private static final int TIEMPO_MS = 2500;
+    static final int TIEMPO_MS = 12000;
 
     /**
      * El host que se usa si el usuario no ha configurado otro.
@@ -111,6 +120,38 @@ final class ApiDrama {
             if (url.startsWith("http")) return true;
             return false;
         }
+
+        /**
+         * v7.38.9 — <b>¿la API se equivoca al decir que esta opción no emite?</b>
+         *
+         * <p>Medido el 2026-11-18: la API marca {@code emite:false} a canales que SÍ
+         * emiten, porque solo sabe probar HLS. Dos casos reales:</p>
+         *
+         * <ul>
+         *   <li>{@code live_tv_abudabyuae}: manifiesto MPEG-DASH con
+         *       {@code http:200} y {@code content_type: application/dash+xml}, y la API
+         *       lo da por muerto porque no es un {@code .m3u8}. Su propio proxy lo
+         *       confirma: {@code /p/…} contesta «esa opción no es un manifiesto HLS (usa
+         *       su URL directa)» y {@code /stream?n=0} sí redirige al {@code .mpd}.</li>
+         *   <li>{@code live_tv_alkaas2}: {@code shoof.alkass.net} responde
+         *       {@code http:200} con una página que reproduce de verdad.</li>
+         * </ul>
+         *
+         * <p>Así que «no emite» solo se acepta cuando el fallo es de verdad: 403, 404,
+         * timeout o un error explícito. Un 2xx con contenido, o un DASH/HLS que la API
+         * no sabe leer, se conserva como plan B: es gratis probarlo, y tirar una url
+         * buena es exactamente el fallo que dejaba canales en negro.</p>
+         */
+        boolean podriaEmitir() {
+            if (sirve()) return true;
+            if (url == null || !url.startsWith("http")) return false;
+            if (http == 403 || http == 404 || http == 410) return false;
+            // Un 2xx con cuerpo: la API no supo leerlo, pero algo hay.
+            if (http >= 200 && http < 300) return true;
+            // DASH declarado: aunque el sondeo de la API haya fallado, se prueba.
+            String l = url.toLowerCase(Locale.ROOT);
+            return l.contains(".mpd") || l.contains(".m3u8");
+        }
     }
 
     /** Respuesta completa de {@code /opciones}. */
@@ -128,9 +169,30 @@ final class ApiDrama {
             this.emitiendo = emitiendo;
         }
 
-        /** Las que emiten, en el orden en que la API las pone (ya priorizadas). */
+        /**
+         * Las que emiten <b>y</b> las que la API descarta por error (ver
+         * {@link OpcionApi#podriaEmitir()}), en el orden en que la API las pone.
+         *
+         * <p>Primero las confirmadas y después las dudosas: si la API acertó, el orden
+         * bueno no cambia; si se equivocó, hay una segunda oportunidad en vez de un
+         * canal en negro.</p>
+         */
         @NonNull
         List<OpcionApi> queEmiten() {
+            List<OpcionApi> confirmadas = new ArrayList<>();
+            List<OpcionApi> dudosas = new ArrayList<>();
+            for (OpcionApi o : opciones) {
+                if (o.sirve()) confirmadas.add(o);
+                else if (o.podriaEmitir()) dudosas.add(o);
+            }
+            List<OpcionApi> out = new ArrayList<>(confirmadas);
+            out.addAll(dudosas);
+            return out;
+        }
+
+        /** Solo las confirmadas por la API. */
+        @NonNull
+        List<OpcionApi> confirmadas() {
             List<OpcionApi> out = new ArrayList<>();
             for (OpcionApi o : opciones) if (o.sirve()) out.add(o);
             return out;
@@ -200,10 +262,11 @@ final class ApiDrama {
     /**
      * Convierte lo que dice la API en opciones para el plan B.
      *
-     * <p><b>El orden importa.</b> Por cada opción que emite se ponen DOS entradas: primero
+     * <p><b>El orden importa.</b> Por cada opción que emite se ponen dos entradas: primero
      * la playlist ya proxada ({@code /p/…}, que ExoPlayer abre de forma nativa: sin
      * WebView, sin sniffer, sin CORS) y detrás la página original como {@code EMBEBIDA},
-     * que es el plan B si el proxy no está disponible.</p>
+     * que es el plan B. Las que la API da por muertas pero traen contenido (DASH, o un
+     * 200 que no sabe leer) se añaden al final con su URL directa: es gratis probarlas.</p>
      *
      * @param base   raíz de la API (puede ser null: entonces no hay proxada)
      * @param codigo código de país de Drama ({@code 232425})
@@ -218,14 +281,20 @@ final class ApiDrama {
         if (o == null) return out;
         String c = (codigo == null || codigo.trim().isEmpty()) ? o.codigo : codigo;
         String d = (idLive == null || idLive.trim().isEmpty()) ? o.idLive : idLive;
+
         for (OpcionApi x : o.queEmiten()) {
-            // 1) La vía corta: el manifiesto ya proxado. Es DIRECTA de verdad.
-            String proxada = urlPlaylist(base, c, d, x.n);
+            // v7.38.9 — un portal (YouTube & cía) nunca entrega el canal a un WebView sin
+            // sesión: no merece ocupar un turno del plan B. Se corta aquí, en origen.
+            if (DramaResolucion.esPaginaDePortal(x.url)) continue;
+            boolean confirmada = x.sirve();
+            // v7.38.9 — la proxada SOLO para lo que la API confirmó como HLS. Su proxy
+            // contesta «esa opción no es un manifiesto HLS (usa su URL directa)» a todo
+            // lo demás, y una url que se sabe que falla no debe ocupar un turno.
+            String proxada = confirmada ? urlPlaylist(base, c, d, x.n) : null;
             if (proxada != null) {
                 out.add(new DramaResolucion.Opcion(proxada, DramaResolucion.Tipo.DIRECTA,
                         null, null, "api·proxy [" + x.n + "] " + x.tipo, false));
             }
-            // 2) El plan B: la página tal cual, abierta en el marco.
             DramaResolucion.Tipo t;
             if ("directa".equalsIgnoreCase(x.tipo) || DramaResolucion.esPlaylist(x.url)) {
                 t = DramaResolucion.Tipo.DIRECTA;

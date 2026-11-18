@@ -155,6 +155,29 @@ public final class DramaResolucion {
     }
 
     /**
+     * v7.38.9 — <b>¿esta opción no es vídeo, sino una página web disfrazada de canal?</b>
+     *
+     * <p>Medido con la API el 2026-11-18: {@code live_tv_beinsportnews} trae como opción
+     * {@code https://www.youtube.com/@beINSPORTS/live} (tipo {@code otra}, http 200). La
+     * API la marca {@code emite:false}, pero por el filtro de contenido de la v7.38.9
+     * entraba igual y podía gastar un turno entero del plan B cargando un YouTube en el
+     * marco. Lo mismo con {@code shoof.alkass.net/live?ch=two}: es un portal, no un
+     * manifiesto.</p>
+     *
+     * <p>Ojo con el equilibrio: un {@code index.html} de los hosts de la cadena SÍ sirve
+     * (ahí vive el manifiesto), así que una página normal NO se descarta. Solo se
+     * descartan los portales de vídeo que nunca entregan el stream a un WebView sin
+     * sesión: YouTube, Vimeo, Dailymotion, Twitch y Facebook.</p>
+     */
+    public static boolean esPaginaDePortal(@Nullable String u) {
+        if (u == null) return false;
+        String l = u.toLowerCase(Locale.ROOT);
+        return l.contains("youtube.com") || l.contains("youtu.be")
+                || l.contains("vimeo.com") || l.contains("dailymotion.com")
+                || l.contains("twitch.tv") || l.contains("facebook.com/watch");
+    }
+
+    /**
      * v7.38.8 — <b>el plan de ataque del canal, en el orden en que hay que probarlo.</b>
      *
      * <ol>
@@ -194,6 +217,7 @@ public final class DramaResolucion {
                 if (o == null || o.url == null) continue;
                 if (o.tipo == Tipo.MARCADOR) continue;
                 if (!vistos.add(clave(o.url))) continue;
+                if (esPaginaDePortal(o.url)) continue;    // v7.38.9: YouTube y compañía
                 out.add(o);
             }
         }
@@ -202,6 +226,7 @@ public final class DramaResolucion {
             for (Opcion o : utilesDeDrama) {
                 if (o == null || o.url == null) continue;
                 if (!vistos.add(clave(o.url))) continue;
+                if (esPaginaDePortal(o.url)) continue;
                 cola.add(o);
             }
             out.addAll(ordenarSinRepetir(cola));

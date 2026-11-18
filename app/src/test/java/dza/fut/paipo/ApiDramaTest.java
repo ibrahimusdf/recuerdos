@@ -56,7 +56,13 @@ public class ApiDramaTest {
         assertEquals(ID, o.idLive);
         assertEquals(7, o.opciones.size());
         assertEquals(3, o.emitiendo);
-        assertEquals(3, o.queEmiten().size());
+        assertEquals("las 3 confirmadas", 3, o.confirmadas().size());
+        // v7.38.9: queEmiten() añade las que la API descarta con un 2xx (no solo las
+        // confirmadas). En beIN 1 eso son las de ordernap/quotarevival/tossequip, que
+        // responden 403 -> siguen fuera. Solo entra la que no es un no rotundo.
+        for (ApiDrama.OpcionApi x : o.queEmiten()) {
+            assertFalse("un 403 es un no de verdad: " + x.url, x.http == 403);
+        }
     }
 
     @Test
@@ -71,7 +77,12 @@ public class ApiDramaTest {
         }
     }
 
-    /** El dato que explica el cuadro negro: las «útiles» de antes daban 403. */
+    /**
+     * El dato que explica el cuadro negro: las «útiles» de antes daban 403.
+     *
+     * <p>v7.38.9 — además, un 403 no debe colarse ni siquiera como «dudosa»: es un no
+     * rotundo del servidor.</p>
+     */
     @Test
     public void lasQueLaAppIntentoAntesDan403() throws IOException {
         for (ApiDrama.OpcionApi x : ApiDrama.leerOpciones(fixture()).opciones) {
@@ -245,6 +256,15 @@ public class ApiDramaTest {
         assertNull(ApiDrama.baseConfigurada(null));
         assertFalse(ApiDrama.estaViva(null));
         ApiDrama.olvidarEstado();
+    }
+
+    /**
+     * v7.38.9 — el tope de la consulta tiene que dar tiempo a la API más lenta, porque
+     * ya no está en el camino crítico. Medido: beIN 5 tarda 13,3 s en UNA opción.
+     */
+    @Test
+    public void elTopeAguantaLaApiMasLenta() throws IOException {
+        assertEquals(12000, ApiDrama.TIEMPO_MS);
     }
 
     /** La base por defecto es lo que hace que esto funcione sin tocar ajustes. */
