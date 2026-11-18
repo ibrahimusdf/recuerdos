@@ -640,6 +640,11 @@ public class PlayerActivity extends AppCompatActivity {
                             // Referer. Antes solo se guardaba la lista «cocinada», que
                             // tiraba los que no eran «la primera opción no marcador».
                             cargarServidoresDelCanal(canal, ses);
+                            // v7.38.8 — el acelerador: qué opciones de ESTE canal emiten,
+                            // según la API de la cadena. Va aquí porque ya estamos en el
+                            // hilo de fondo y ya se sabe el id_live. Si no hay API, o
+                            // duerme, esto devuelve null y no cambia nada.
+                            opcionesDeLaApi = pedirOpcionesALaApi(canal);
                             if (DramaSesion.siYaEsStream(vv.url)) {
                                 ra = new String[]{ vv.url, vv.ua };
                                 long tPost = System.currentTimeMillis() - t0N;
@@ -2407,6 +2412,59 @@ public class PlayerActivity extends AppCompatActivity {
     private DramaResolucion.Opcion embedEnCurso = null;
 
     /**
+     * v7.38.8 — lo que la API de la cadena dijo de ESTE canal, ya convertido a opciones
+     * del plan B: primero la playlist proxada ({@code /p/…}, que ExoPlayer abre nativo)
+     * y detrás la página original de cada opción que emite.
+     *
+     * <p>Se rellena en el hilo de fondo del arranque de canal, antes de que el plan B
+     * tenga que elegir. Si queda vacía es que no hay API configurada o no contestó, y
+     * todo funciona como en la v7.38.7.</p>
+     */
+    private java.util.List<DramaResolucion.Opcion> opcionesDeLaApi = null;
+
+    /**
+     * v7.38.8 — pregunta a la API de la cadena qué opciones de este canal emiten.
+     *
+     * <p>Corre SIEMPRE en el hilo de fondo del arranque (nunca en UI). Nunca lanza y
+     * nunca es obligatorio: si no hay base configurada, o la API duerme, o contesta
+     * algo raro, devuelve null y el plan B sigue con lo que ya tenía.</p>
+     *
+     * @return las opciones para el plan B, o null si no hay nada que aportar
+     */
+    private java.util.List<DramaResolucion.Opcion> pedirOpcionesALaApi(String canalDrama) {
+        try {
+            String base = ApiDrama.baseConfigurada(this);
+            if (base == null) {
+                log("api: sin API configurada — plan B local, como la v7.38.7");
+                return null;
+            }
+            String codigo = FuenteCanales.codigoFg(this);
+            if (codigo == null || codigo.trim().isEmpty()) codigo = "232425";
+            String idLive = DramaSesion.idDeCanal(canalDrama);
+            if (idLive == null || idLive.isEmpty()) {
+                log("api: el canal no viene de Drama (sin id_live) — no hay nada que preguntar");
+                return null;
+            }
+            long t0 = System.currentTimeMillis();
+            ApiDrama.Opciones o = ApiDrama.pedirOpciones(base, codigo.trim(), idLive);
+            long ms = System.currentTimeMillis() - t0;
+            if (o == null) {
+                log("api: sin respuesta util de " + base + " en " + ms + " ms — plan B local");
+                return null;
+            }
+            java.util.List<DramaResolucion.Opcion> ops =
+                    ApiDrama.aOpciones(base, codigo.trim(), idLive, o);
+            log("api: " + o.opciones.size() + " opciones, " + o.emitiendo + " emitiendo · "
+                    + ops.size() + " utiles para el plan B · " + ms + " ms");
+            for (DramaResolucion.Opcion x : ops) log("   · API " + x.etiqueta());
+            return ops.isEmpty() ? null : ops;
+        } catch (Throwable t) {
+            log("api: fallo consultando (" + t.getClass().getSimpleName() + ") — se sigue sin ella");
+            return null;
+        }
+    }
+
+    /**
      * Vuelve a la lista de servidores del canal y devuelve el siguiente que aún no
      * se haya probado: primero embebidas, luego directas. Sin repetir y sin
      * marcadores. Así no queda ningún servidor sin intentar.
@@ -2420,7 +2478,13 @@ public class PlayerActivity extends AppCompatActivity {
                     ServidoresDelCanal.leer(this,
                             ServidoresDelCanal.claveDeCanal(canalActual)));
         }
-        return siguienteOpcionUtil(streamUrl, streamBackup, servidoresProbados, recordados);
+        // v7.38.8 — la memoria del canal sigue MANDANDO (es lo que aquí se vio emitir),
+        // detrás va lo que la API probó que emite y, al final, lo que trajo Drama. Solo
+        // se añade lo que no esté ya: la proxada de la API es una url distinta de la
+        // página original, así que las dos conviven sin pisarse.
+        java.util.List<DramaResolucion.Opcion> extra = opcionesDeLaApi;
+        return siguienteOpcionUtil(streamUrl, streamBackup, servidoresProbados,
+                recordados, extra);
     }
 
     /**
@@ -2437,8 +2501,41 @@ public class PlayerActivity extends AppCompatActivity {
         // es pura y tiene sus propias pruebas (PlanBTest). Aquí solo se le pasa la
         // lista del canal. Sin esto había dos selectores con reglas parecidas pero no
         // iguales, y el bug del `return null` vivía en el tercero.
+        return siguienteOpcionUtil(url, backup, probados, null, null);
+    }
+
+    /**
+     * v7.38.7 — el mismo selector, con la MEMORIA del canal por delante.
+     *
+     * <p>Orden final: lo que ya se vio reproducir aquí ({@code recordados}) → lo que
+     * Drama acaba de entregar. La memoria conserva el UA y el Referer con los que el
+     * CDN aceptó la url; perderlos es un 403 (medido con primetv).</p>
+     */
+    public static DramaResolucion.Opcion siguienteOpcionUtil(
+            String url, String backup,
+            java.util.Collection<String> probados,
+            java.util.List<DramaResolucion.Opcion> recordados) {
+        return siguienteOpcionUtil(url, backup, probados, recordados, null);
+    }
+
+    /**
+     * v7.38.8 — el selector completo: memoria del canal → lo que la API probó que emite
+     * (la playlist proxada va primero dentro de ese bloque) → lo que Drama entrega.
+     *
+     * <p>Puro: no toca red, ni disco, ni el WebView. Es el que decide qué se abre y en
+     * qué orden, así que se puede probar sin dispositivo.</p>
+     */
+    public static DramaResolucion.Opcion siguienteOpcionUtil(
+            String url, String backup,
+            java.util.Collection<String> probados,
+            java.util.List<DramaResolucion.Opcion> recordados,
+            java.util.List<DramaResolucion.Opcion> deLaApi) {
+        // El orden lo decide DramaResolucion.planDeAtaque (puro y con pruebas): memoria
+        // del canal -> lo que la API ya probó, en SU orden -> lo que trajo Drama.
         return DramaResolucion.siguiente(
-                DramaResolucion.utiles(url, backup), probados, null, null);
+                DramaResolucion.planDeAtaque(recordados, deLaApi,
+                        DramaResolucion.utiles(url, backup)),
+                probados, null, null);
     }
 
     /**

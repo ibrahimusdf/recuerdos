@@ -91,6 +91,18 @@ public final class DramaResolucion {
      * DIRECTA y se abre en ExoPlayer. Si algún día llega algo que no es un stream,
      * se marca PAGINA y el plan B no lo tratará como vídeo.
      */
+    /**
+     * v7.38.8 — una opción que trae la API de la cadena: ya viene probada (la API dice
+     * si emite) y con su número de opción, que es el que usa su proxy de playlist.
+     */
+    @NonNull
+    static Opcion deApi(@NonNull String url, @NonNull Tipo tipo, @Nullable String ua,
+                        @Nullable String referer, int n) {
+        String desc = (tipo == Tipo.DIRECTA ? "api·directa" : "api·" + tipo.name().toLowerCase(Locale.ROOT))
+                + " [" + n + "]";
+        return new Opcion(url, tipo, ua, referer, desc, tipo == Tipo.EMBEBIDA);
+    }
+
     @NonNull
     static Opcion directaCon(@NonNull String url, @Nullable String ua, @Nullable String referer) {
         Tipo t = clasificar(url, false);
@@ -139,6 +151,61 @@ public final class DramaResolucion {
         }
         // el orden conocido de Drama (embebidas antes que directas) se conserva en la cola
         out.addAll(ordenarSinRepetir(nuevas));
+        return out;
+    }
+
+    /**
+     * v7.38.8 — <b>el plan de ataque del canal, en el orden en que hay que probarlo.</b>
+     *
+     * <ol>
+     *   <li><b>La memoria del canal</b> ({@code ServidoresDelCanal}): lo que en ESTE
+     *       móvil ya se vio emitir, con su UA y su Referer exactos.</li>
+     *   <li><b>Lo que la API probó que emite</b>, <em>en el orden de la API</em>. Ese
+     *       orden es importante y por eso NO se reordena: dentro van primero las
+     *       playlists proxadas ({@code /p/…}, DIRECTA, ExoPlayer nativo) y detrás la
+     *       página original de cada una ({@code EMBEBIDA}, plan B).</li>
+     *   <li><b>Lo que Drama acaba de entregar</b>, con el orden de siempre
+     *       ({@link #ordenarSinRepetir}: embebidas antes que directas).</li>
+     * </ol>
+     *
+     * <p>Ojo con el paso 2: {@link #conRecordados} manda las nuevas por
+     * {@code ordenarSinRepetir}, que pone <em>todas</em> las EMBEBIDA antes que las
+     * DIRECTA. Aplicado a las opciones de la API eso pondría la página lenta delante de
+     * la playlist proxada rápida, que es exactamente al revés de lo que interesa. Por eso
+     * este método existe en vez de reutilizar aquel.</p>
+     */
+    @NonNull
+    static List<Opcion> planDeAtaque(@Nullable List<Opcion> recordados,
+                                     @Nullable List<Opcion> deLaApi,
+                                     @Nullable List<Opcion> utilesDeDrama) {
+        List<Opcion> out = new ArrayList<>();
+        LinkedHashSet<String> vistos = new LinkedHashSet<>();
+
+        if (recordados != null) {
+            for (Opcion o : recordados) {
+                if (o == null || o.url == null) continue;
+                if (o.tipo == Tipo.MARCADOR) continue;
+                if (!vistos.add(clave(o.url))) continue;
+                out.add(o);
+            }
+        }
+        if (deLaApi != null) {
+            for (Opcion o : deLaApi) {                    // orden de la API, SIN tocar
+                if (o == null || o.url == null) continue;
+                if (o.tipo == Tipo.MARCADOR) continue;
+                if (!vistos.add(clave(o.url))) continue;
+                out.add(o);
+            }
+        }
+        if (utilesDeDrama != null) {
+            List<Opcion> cola = new ArrayList<>();
+            for (Opcion o : utilesDeDrama) {
+                if (o == null || o.url == null) continue;
+                if (!vistos.add(clave(o.url))) continue;
+                cola.add(o);
+            }
+            out.addAll(ordenarSinRepetir(cola));
+        }
         return out;
     }
 
@@ -400,10 +467,26 @@ public final class DramaResolucion {
     public static Tipo clasificar(@Nullable String url, boolean iframe) {
         if (url == null || url.isEmpty()) return Tipo.MARCADOR;
         String u = url.trim();
-        if (u.contains(".LS.") || u.startsWith(".LS.")) return Tipo.MARCADOR;
-        if (!u.startsWith("http")) return Tipo.MARCADOR;
+        if (!u.startsWith("http")) {
+            // ".LS.V2…" — sin esquema: es la CADENA del marcador, no una url. Solo el
+            // redirector del sitio la convierte en algo abrible (y solo dentro de su
+            // navegador). Esto sigue siendo MARCADOR.
+            return Tipo.MARCADOR;
+        }
         if (esPlaylist(u)) return Tipo.DIRECTA;
         if (iframe || esEmbebida(u)) return Tipo.EMBEBIDA;
+        // v7.38.8 — OJO, ESTE ORDEN IMPORTA. Antes un ".LS." se marcaba MARCADOR
+        // aunque estuviera DENTRO de una url https válida, y eso tiraba opciones que
+        // sí emiten. Medido con la API de la cadena (2026-11-18, beIN 1): el marcador
+        // ".LS.V2…description_SD_/s" resuelve a
+        //   https://spe6.speedsuperai.cfd/pages/alkoaqoohqze/index.html
+        // y esa página SÍ emite (http 200), mientras que las dos «útiles» que la app
+        // probaba (primetv y ordernap) daban 403. Ahora una url https que lleve ".LS."
+        // como parámetro o en el host se clasifica por lo que ES, no por la etiqueta.
+        // Una url https que no es playlist ni embed conocido (pero que la API de la
+        // cadena dice que emite) es una PÁGINA abrible en el marco: no es stream, así
+        // que ExoPlayer no la toca. Ojo: aquí ya NO se devuelve MARCADOR por llevar
+        // ".LS." — eso es lo que se comía las opciones buenas.
         return Tipo.PAGINA;
     }
 
