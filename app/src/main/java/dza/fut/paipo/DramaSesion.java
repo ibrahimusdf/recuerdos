@@ -899,7 +899,10 @@ public final class DramaSesion {
                 if (!e.isJsonObject()) continue;
                 String u = texto(e.getAsJsonObject(), "u");
                 if (u == null || !u.startsWith("http")) continue;
-                if (u.contains(".LS.")) continue;
+                // v7.39.3 — antes solo se miraba `.LS.` a pelo; el clasificador también
+                // pilla `/.ls` y los «hosts» que empiezan por punto (http://.V2daddy…).
+                // Este es el último filtro antes de que una url llegue al reproductor.
+                if (DramaResolucion.esMarcadorSinClasificar(u)) continue;
                 return u;
             }
         } catch (Exception ignore) { }

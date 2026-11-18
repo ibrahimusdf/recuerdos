@@ -1980,6 +1980,11 @@ public class PlayerActivity extends AppCompatActivity {
                 // Antes se cogia la primera opcion no-marcador, que en beIN es el
                 // mismo m3u8 directo que acaba de fallar: se "enmarcaba" un m3u8 y
                 // el usuario veia un reproductor vacio (log del movil, 14:05:32).
+                // v7.39.3 — ANTES de pensarlo: ¿la carrera ya enterró esta url? Si sí, no se
+                // gasta ni un reintento más (en el logcat: 4 s + 40 s de WebView en una url
+                // que había dado 403 a los 175 ms).
+                if (cortarSiLaFuenteEstaMuerta(generacionDelCanal.actual())) return;
+
                 DramaResolucion.Opcion planB = siguienteOpcionUtil();
                 boolean planBEsElMismoStream = planB != null && urlEnReproduccion != null
                         && planB.url.equals(urlEnReproduccion);
@@ -2004,6 +2009,18 @@ public class PlayerActivity extends AppCompatActivity {
                 // (otra directa, o el embed) en vez de quedarse en el mismo bucle.
                 if (errorRefreshCount >= MAX_REFRESH_RETRIES && !embeddedEnVentana) {
                     DramaResolucion.Opcion otra = siguienteOpcionUtil();
+                    // v7.39.3 — y aquí NUNCA un marcador .LS. ni una url ya enterrada. Este
+                    // era el agujero por el que «http://.LS.V2daddy_91/s» llegó a ExoPlayer
+                    // (logcat 14:06:28): la carrera no lo probaba, pero el árbol de errores
+                    // sí lo ofrecía.
+                    if (otra != null && (DramaResolucion.esMarcadorSinClasificar(otra.url)
+                            || descartesDeLaCarrera.estaMuerta(otra.url))) {
+                        log("⛔ descartado del árbol de errores (" 
+                                + (DramaResolucion.esMarcadorSinClasificar(otra.url)
+                                   ? "marcador .LS." : "url ya enterrada") + "): " + otra.url);
+                        if (!servidoresProbados.contains(otra.url)) servidoresProbados.add(otra.url);
+                        otra = siguienteOpcionUtil();
+                    }
                     if (otra != null) {
                         log("↪️ esta directa no da vídeo; se prueba otro servidor del canal -> "
                                 + otra.etiqueta());
@@ -2541,6 +2558,16 @@ public class PlayerActivity extends AppCompatActivity {
     private volatile boolean carreraEnMarcha = false;
 
     /**
+     * v7.39.3 — lo que la carrera ya descartó en este canal.
+     *
+     * <p>Si una url murió con 403/404/410 o ni resolvió el DNS, el reproductor NO debe
+     * gastar sus 4 reintentos ni los 40 s del WebView en ella. Medido en el logcat del
+     * usuario: 4 s + 40 s tirados en algo que la carrera había descartado en 175 ms.</p>
+     */
+    private final CarreraDeOpciones.Descartes descartesDeLaCarrera =
+            new CarreraDeOpciones.Descartes();
+
+    /**
      * v7.39.1 — <b>EL GUARDIÁN: la generación del canal que se está viendo.</b>
      *
      * <p><b>El defecto que arregla, tal como lo describió el usuario:</b> «a veces clic en
@@ -2580,6 +2607,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void invalidarCanalAnterior(String motivo) {
         int gen = generacionDelCanal.abrirCanal();
         urlsEnCarrera.clear();
+        descartesDeLaCarrera.limpiar();
         carreraEnMarcha = false;
         imagenConfirmada = false;
         arranqueDeLaFuenteMs = 0L;
@@ -2815,6 +2843,8 @@ public class PlayerActivity extends AppCompatActivity {
                             @Override public void descartada(CarreraDeOpciones.Respuesta r) {
                                 if (miGeneracion != generacionDelCanal.actual()) return;
                                 log("🏁 descartada (" + r.motivo + ", " + r.ms + " ms): " + r.opcion.url);
+                                // v7.39.3 — se apunta para que el reproductor no la reintente.
+                                if (esMuerteRotunda(r)) descartesDeLaCarrera.apuntar(r.opcion.url);
                             }
 
                             @Override public void ninguna(java.util.List<CarreraDeOpciones.Respuesta> intentos) {
@@ -2850,6 +2880,57 @@ public class PlayerActivity extends AppCompatActivity {
             hilosDeCarrera = Executors.newSingleThreadExecutor();
         }
         return hilosDeCarrera;
+    }
+
+    /**
+     * v7.39.3 — ¿este descarte es una muerte ROTUNDA (no merece otro intento)?
+     *
+     * <p>Sí: 403/404/410 (el servidor dijo que no) y un fallo de DNS (ese host no existe).</p>
+     *
+     * <p>No: un <b>timeout</b> — un CDN lento puede contestar a la segunda, y el proxy de la
+     * cadena tarda 15 s en frío y 1 s en caliente. Tampoco un <b>5xx</b>: un 503 es «ahora
+     * no», no «nunca», y enterrarlo sería tirar un canal que se recupera solo.</p>
+     */
+    static boolean esMuerteRotunda(CarreraDeOpciones.Respuesta r) {
+        if (r == null) return false;
+        if (CarreraDeOpciones.esNoRotundo(r.http)) return true;
+        if (r.motivo != null && r.motivo.contains("UnknownHost")) return true;
+        return false;
+    }
+
+    /**
+     * v7.39.3 — <b>el reproductor se entera de que su fuente está muerta.</b>
+     *
+     * <p>Medido en el logcat del usuario (beinsport8 y beinsport1): la carrera descartaba la
+     * url que ExoPlayer estaba intentando —403 en 175 ms, DNS en 1 ms— y el reproductor
+     * igualmente gastaba 4 reintentos y luego 20 s de {@code StreamResolver} + 20 s de
+     * WebView oculto. Total: 44 s en una url que ya se sabía muerta.</p>
+     *
+     * <p>Ahora, en cuanto la carrera entierra la fuente en curso, se para ExoPlayer y se
+     * sigue con el plan del canal. Sin refrescos, sin WebView: no hay nada que buscar en una
+     * url que contestó 403.</p>
+     *
+     * @return true si se cortó aquí (el que llama debe salir)
+     */
+    private boolean cortarSiLaFuenteEstaMuerta(final int miGeneracion) {
+        final String enCurso = urlEnReproduccion;
+        if (enCurso == null || !descartesDeLaCarrera.estaMuerta(enCurso)) return false;
+        if (miGeneracion != generacionDelCanal.actual()) return false;
+        log("⏹ la carrera ya enterró esta url (" + enCurso + "): se para y se sigue con el canal");
+        errorRefreshCount = MAX_REFRESH_RETRIES;          // no insistir
+        webViewOcultoYaProbado = true;                    // no hay nada que capturar
+        isResolving = false;
+        streamReady = false;
+        if (player != null) { try { player.stop(); } catch (Throwable ignored) { } }
+        DramaResolucion.Opcion otra = siguienteOpcionUtil();
+        if (otra != null) {
+            log("↪ se prueba el siguiente del canal -> " + otra.etiqueta());
+            probarServidor(otra);
+        } else {
+            log("⏹ no queda ninguno más del canal");
+            avisarSinStream();
+        }
+        return true;
     }
 
     /** El plan del canal AHORA: memoria → API → lo que trajo Drama. Sin probar. */
@@ -3482,15 +3563,28 @@ public class PlayerActivity extends AppCompatActivity {
 
     /** Avisa al usuario de que este enlace no da stream, en vez de mostrarle una web. */
     private void avisarSinStream() {
-        // v7.38.3 — marcador .LS.: el que resuelve es el proveedor, no el WebView.
-        // v7.39.2 — MEDIDO en el logcat del usuario (2026-11-18 13:49:23): el canal tenía los
-        // DOS servidores buenos respondiendo 200 y aun así se abrió el embed «.LS.V2daddy_91/s»
-        // —una «url» que ni siquiera es un host— encima del vídeo que ya sonaba. La guarda de
-        // arriba miraba streamDirecto/urlIframeInicial, que valen null en este estado; los
-        // marcadores vivos están en la lista del canal (streamUrl/streamBackup).
-        if (esMarcadorLs(streamDirecto) || esMarcadorLs(urlIframeInicial) || hayMarcadorEnLaLista()) {
-            log("🔒 canal con marcador .LS.: lo resuelve el redirector del proveedor "
-                    + "(glbr), que ahora mismo no responde");
+        // ═══════════════════════════════════════════════════════════════════════════
+        // v7.39.3 — AQUÍ HABÍA UNA REGRESIÓN MÍA, Y ERA GRAVE.
+        //
+        // La v7.39.2 puso `hayMarcadorEnLaLista()` en la PRIMERA línea de este método.
+        // El razonamiento (los .LS. no deben llegar al plan B) era correcto, pero el sitio
+        // era el peor: en vez de FILTRARLOS de la lista, hacía que la app SE RINDIERA antes
+        // de probar los embeds. Y todos los canales de beIN traen marcadores .LS. SIEMPRE.
+        //
+        // Medido en el logcat del usuario (v7.39.2, 2026-11-18 14:25:25 y 15:07:36): la
+        // carrera fallaba y salía «🔒 canal con marcador .LS. …» sin intentar siquiera
+        // ordernap/quotarevival — que son la única vía real de esos canales. Traducción:
+        // desde la 7.39.2 NINGÚN canal de beIN podía abrir por embed.
+        //
+        // La guarda pasa al FINAL (ver más abajo), donde significa lo que debe: «me he
+        // quedado sin nada que probar y lo único que traía el canal eran marcadores».
+        // ═══════════════════════════════════════════════════════════════════════════
+        // v7.38.3 — caso distinto y legítimo: la FUENTE que estamos intentando es en sí un
+        // marcador (no una lista que los contenga). Ahí sí no hay nada que hacer aquí: el
+        // que resuelve es el glbr del proveedor.
+        if (esMarcadorLs(streamDirecto) || esMarcadorLs(urlIframeInicial)) {
+            log("🔒 la fuente de este canal es un marcador .LS.: lo resuelve el redirector "
+                    + "del proveedor (glbr), que ahora mismo no responde");
             runOnUiThread(() -> {
                 ocultarCargando();
                 showControls();
@@ -3522,11 +3616,27 @@ public class PlayerActivity extends AppCompatActivity {
             probarServidor(queda);
             return;
         }
+        // v7.39.3 — ÚLTIMO RECURSO, ya sin nada que probar: si lo único que traía el canal
+        // eran marcadores .LS., se dice la verdad en vez del genérico.
+        if (hayMarcadorEnLaLista()) {
+            log("🔒 sin nada más que probar y el canal solo trae marcadores .LS. "
+                    + "-> lo resuelve el redirector del proveedor (glbr)");
+            runOnUiThread(() -> {
+                ocultarCargando();
+                showControls();
+                try {
+                    Toast.makeText(this, "Este canal lo sirve el proveedor y su redirector "
+                            + "no responde ahora mismo. Prueba otro canal.",
+                            Toast.LENGTH_LONG).show();
+                } catch (Throwable ignored) { }
+            });
+            return;
+        }
         runOnUiThread(() -> {
             ocultarCargando();
             showControls();
             try {
-                Toast.makeText(this, "No se pudo cargar este enlace. Prueba con otra opción del canal.",
+                Toast.makeText(this, "No se pudo cargar este enlace. Prueba otra opción del canal.",
                         Toast.LENGTH_LONG).show();
             } catch (Throwable ignored) { }
         });

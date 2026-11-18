@@ -78,6 +78,25 @@ final class ApiDrama {
     static final int TIEMPO_MS = 12000;
 
     /**
+     * v7.39.3 — tope del PRIMER intento desde que la API se dio por dormida.
+     *
+     * <p><b>Medido en el logcat del usuario (2026-11-18).</b> Dos cosas a la vez:</p>
+     * <ul>
+     *   <li>con Render caliente, {@code /opciones} contesta en <b>470 ms</b> (13:49:22);</li>
+     *   <li>con Render en frío, la consulta NO contesta en <b>12 s</b> (14:23:13 y 15:07:33,
+     *       {@code SocketTimeoutException}).</li>
+     * </ul>
+     *
+     * <p>Y 12 s no es que la API esté caída: es que el plan gratuito de Render tarda en
+     * despertar. La app de referencia que analizamos lo tenía resuelto con un
+     * {@code readTimeout} de <b>70 s en el primer intento</b> y 3 reintentos. Aquí se hace
+     * igual: el primer intento de cada «despertar» tiene paciencia de Render; el resto va
+     * con {@link #TIEMPO_MS}. Como la consulta va en paralelo y nadie la espera, el usuario
+     * no paga nada por esa paciencia.</p>
+     */
+    static final int TIEMPO_DESPERTAR_MS = 45000;
+
+    /**
      * El host que se usa si el usuario no ha configurado otro.
      *
      * <p><b>Por qué hay uno por defecto.</b> El usuario pidió que la app haga «lo mismo
@@ -439,25 +458,53 @@ final class ApiDrama {
     private static volatile int estado = SIN_PROBAR;
 
     /**
-     * ¿Hay que seguir preguntando a la API en esta sesión?
+     * v7.39.3 — <b>enfriamiento, no muerte.</b> Era el fallo más caro de la 7.39.2.
      *
-     * <p>Un plan gratuito que duerme puede tardar 30 s en despertar. No vamos a pagar eso
-     * en cada canal: se prueba <b>una vez</b> y, si no contesta, se deja en paz hasta que
-     * la app se reinicie. Así el peor caso es un único arranque 2,5 s más lento, y solo
-     * si el host estaba dormido.</p>
+     * <p><b>Medido en el logcat del usuario:</b> UN timeout de 12 s (Render en frío) dejaba
+     * {@code estado = MUERTA} <b>para todo el proceso</b>. A partir de ahí, cada canal
+     * imprimía {@code «api: sin respuesta util … en 0 ms»} — ni siquiera lo intentaba:</p>
+     *
+     * <pre>
+     * 14:23:13  W  no se pudo consultar (SocketTimeoutException) — no se vuelve a intentar
+     * 14:25:12  D  api: sin respuesta util … en 0 ms     ← otro canal, ya rendido
+     * 14:26:17  D  api: sin respuesta util … en 0 ms     ← Activity nueva, sigue rendido
+     * </pre>
+     *
+     * <p>En beinsport8 eso dejó la carrera con dos candidatos y los dos muertos. Lo correcto
+     * es lo que hace la app de referencia: reintentar. Aquí, tras un fallo se espera
+     * {@link #ENFRIAMIENTO_MS} y se vuelve a probar con paciencia de despertar.</p>
      */
+    static final long ENFRIAMIENTO_MS = 60000L;
+
+    /** Cuándo se puede volver a intentar (0 = ya). */
+    private static volatile long proximoIntento = 0L;
+
+    /** ¿Toca esperar antes de volver a preguntar? */
     static boolean sesionSinApi() {
-        return estado == MUERTA;
+        if (estado != MUERTA) return false;
+        long falta = proximoIntento - System.currentTimeMillis();
+        if (falta <= 0) {
+            estado = SIN_PROBAR;          // se cumplió el enfriamiento: se vuelve a probar
+            return false;
+        }
+        return true;
     }
 
-    /** Marca la API como caída para el resto de la sesión (lo llama un fallo real). */
+    /** Marca un fallo: no muerte, enfriamiento. Se vuelve a probar en un minuto. */
     static void marcarCaida() {
         estado = MUERTA;
+        proximoIntento = System.currentTimeMillis() + ENFRIAMIENTO_MS;
     }
 
     /** Solo para pruebas: vuelve a «sin probar». */
     static void olvidarEstado() {
         estado = SIN_PROBAR;
+        proximoIntento = 0L;
+    }
+
+    /** ¿Es el primer intento tras un enfriamiento? (para darle paciencia de despertar) */
+    private static boolean tocaDespertar() {
+        return estado == SIN_PROBAR;
     }
 
     /**
@@ -594,10 +641,12 @@ final class ApiDrama {
     static Opciones pedirOpciones(@Nullable String base, @NonNull String codigo,
                                   @NonNull String idLive) {
         if (base == null || base.trim().isEmpty()) return null;
-        if (sesionSinApi()) return null;              // ya se sabe que no contesta
+        if (sesionSinApi()) return null;              // enfriamiento en curso (v7.39.3)
         String url = recortar(base) + "/opciones/" + codigo + "/" + idLive;
+        // v7.39.3 — si venimos de un fallo, el primer intento tiene paciencia de despertar.
+        final int tope = tocaDespertar() ? TIEMPO_DESPERTAR_MS : TIEMPO_MS;
         try {
-            String cuerpo = get(url);
+            String cuerpo = get(url, tope);
             Opciones o = leerOpciones(cuerpo);
             if (o == null) {
                 android.util.Log.w(TAG, "api drama: respuesta no entendible de " + url);
@@ -614,7 +663,8 @@ final class ApiDrama {
             return o;
         } catch (Throwable t) {
             android.util.Log.w(TAG, "api drama: no se pudo consultar ("
-                    + t.getClass().getSimpleName() + ") — no se vuelve a intentar esta sesion");
+                    + t.getClass().getSimpleName() + " · tope " + tope + " ms) — se reintenta en "
+                    + (ENFRIAMIENTO_MS / 1000) + " s, no se rinde la sesion");
             marcarCaida();
             return null;
         }
@@ -622,11 +672,17 @@ final class ApiDrama {
 
     @NonNull
     private static String get(@NonNull String url) throws Exception {
+        return get(url, TIEMPO_MS);
+    }
+
+    /** v7.39.3 — el mismo GET, con tope explícito (ver {@link #TIEMPO_DESPERTAR_MS}). */
+    @NonNull
+    private static String get(@NonNull String url, int topeMs) throws Exception {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
-            c.setConnectTimeout(TIEMPO_MS);
-            c.setReadTimeout(TIEMPO_MS);
+            c.setConnectTimeout(topeMs);
+            c.setReadTimeout(topeMs);
             c.setRequestProperty("Accept", "application/json");
             int code = c.getResponseCode();
             InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();

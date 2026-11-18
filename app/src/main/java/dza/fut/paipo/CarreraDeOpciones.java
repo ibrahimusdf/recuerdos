@@ -71,6 +71,38 @@ public final class CarreraDeOpciones {
     /** Tope de espera por opción. El proxy de Render a veces arranca en frío (~13 s). */
     public static final int TOPE_MS = 15000;
 
+    /**
+     * v7.39.3 — <b>tope propio para el proxy de la cadena.</b>
+     *
+     * <p><b>Medido en el logcat del usuario (2026-11-18).</b> El mismo {@code /p/…/0.m3u8}
+     * tarda dos cosas muy distintas según Render:</p>
+     *
+     * <pre>
+     * 13:49:24  carrera ganada en 1038 ms (Render caliente)
+     * 14:25:25  descartada (timeout, 15007 ms): …/p/232425/live_tv_beinsport1/0.m3u8
+     * 14:26:31  descartada (timeout, 15084 ms): …/p/232425/live_tv_beinsport1/0.m3u8
+     * </pre>
+     *
+     * <p>Morir a los 15,0 s cuando el host tarda 15,1 s es perder el canal por 100 ms. Con
+     * Render en frío la proxada necesita más margen; un CDN normal no.</p>
+     */
+    public static final int TOPE_PROXY_MS = 22000;
+
+    /**
+     * v7.39.3 — ¿esta url es del proxy de la cadena? Se reconoce por la forma, igual que en
+     * {@link DramaResolucion#esHostDeLaCadena}: {@code /p/…} y {@code /ps/…} justo después
+     * del host.
+     */
+    public static boolean esDelProxy(@Nullable String u) {
+        if (u == null) return false;
+        return u.matches("^https?://[^/]+/(p|ps)/.*");
+    }
+
+    /** El tope que le corresponde a esta url. */
+    public static int topePara(@Nullable String u) {
+        return esDelProxy(u) ? TOPE_PROXY_MS : TOPE_MS;
+    }
+
     /** Cuántos bytes se leen para ver si es un manifiesto. Un #EXTM3U cabe en 8. */
     static final int MUESTRA_BYTES = 4096;
 
@@ -214,6 +246,32 @@ public final class CarreraDeOpciones {
         }
     }
 
+    /**
+     * v7.39.3 — <b>lo que la carrera ya sabe y el reproductor necesita.</b>
+     *
+     * <p>Medido en el logcat del usuario: la carrera descartó {@code primetv…/mono.tbin.m3u8}
+     * por 403 a los <b>175 ms</b>… y el reproductor siguió reintentándolo 4 veces (4 s) y
+     * luego 40 s de WebView. Quien sondea sabe algo que el reproductor no puede adivinar;
+     * esto es el puente.</p>
+     */
+    public static final class Descartes {
+        private final java.util.Set<String> urls =
+                java.util.Collections.synchronizedSet(new java.util.LinkedHashSet<String>());
+
+        public void apuntar(@Nullable String url) {
+            if (url != null && !url.isEmpty()) urls.add(url);
+        }
+
+        /** ¿Esta url ya se descartó con un NO rotundo (o murió) en esta generación? */
+        public boolean estaMuerta(@Nullable String url) {
+            return url != null && urls.contains(url);
+        }
+
+        public void limpiar() { urls.clear(); }
+
+        public int tamano() { return urls.size(); }
+    }
+
     /** Quien lanza la carrera recibe aquí la ganadora y los descartes. */
     public interface Oyente {
         /** La primera que dio manifiesto. Llega UNA vez. En el hilo de la carrera. */
@@ -273,7 +331,7 @@ public final class CarreraDeOpciones {
 
         // Se espera a que haya ganadora o a que todas hayan terminado. Sin sondeos
         // periódicos: un solo wait, con el tope de una opción más un margen.
-        long limite = System.currentTimeMillis() + TOPE_MS + 2000L;
+        long limite = System.currentTimeMillis() + TOPE_PROXY_MS + 3000L;   // v7.39.3
         synchronized (candado) {
             while (ganadora[0] == null && quedan.get() > 0) {
                 long falta = limite - System.currentTimeMillis();
@@ -299,11 +357,12 @@ public final class CarreraDeOpciones {
     static Respuesta sondear(@NonNull DramaResolucion.Opcion op,
                              @NonNull AtomicBoolean cerrada) {
         long t0 = System.currentTimeMillis();
+        final int tope = topePara(op.url);     // v7.39.3: el proxy tiene su propio margen
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(op.url).openConnection();
-            c.setConnectTimeout(TOPE_MS);
-            c.setReadTimeout(TOPE_MS);
+            c.setConnectTimeout(tope);
+            c.setReadTimeout(tope);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", UA);
             c.setRequestProperty("Accept", "*/*");
