@@ -1442,19 +1442,45 @@ public final class DramaSesion {
                 // con la tarjeta rusa «ОТСУТСТВУЕТ ПОДПИСКА», que el player reproduce
                 // como si fuera el canal (le paso en beIN Fr1). Antes se elegia la
                 // directa y el usuario veia el cartel de error.
-                String embebida = primeraEmbebida(vg.length > 2 ? vg[2] : null);
-                if (embebida != null) {
-                    Log.d(TAG, "resolverVivo: hay embebida, se prefiere -> " + embebida);
-                    return new Vivo(embebida, "",
-                            vg.length > 2 ? vg[2] : "[]");
-                }
-                if (siYaEsStream(vg[0]) && !esAvisoSinCanal(vg[0])) {
-                    Log.d(TAG, "resolverVivo: glasbi dio el stream directo, sin glbr");
-                    return new Vivo(vg[0], vg[1] == null ? "" : vg[1],
-                            vg.length > 2 ? vg[2] : "[]");
-                }
-                ra = glbrCon(sesionJson, glt, wire, pr[0], vg);
-                if (ra == null) {
+            // v7.38.6 — ORDEN POR VELOCIDAD. Lo que glasbi ya resolvió se gasta PRIMERO.
+            //
+            // Medido en el logcat del usuario (2026-11-17 19:02):
+            //   19:02:03  glasbi [glt] OK -> http://primetv.cc.cd/…/mono.tbin.m3u8
+            //             resolverVivo: hay embebida, se prefiere -> ordernap
+            //   19:02:04  plan B: embed ordernap
+            //   19:02:19  plan B: probando -> ordernap      (otra vez)
+            //   19:02:49  plan B: embed primetv   <-- la MISMA url del segundo 3
+            //   19:02:51  el embed está pidiendo vídeo (segmentos .ts)
+            //   19:03:04  hay imagen (vídeo confirmado)
+            //
+            // O sea: beIN 1 SÍ reproducía, pero 61 s después de tener en la mano un
+            // m3u8 que ya venía resuelto. Aquí se tiraba ese m3u8 (rama else de
+            // PlayerActivity) para ir a un embed que quizá no emite, y cuando el
+            // plan B llegaba a la directa la abría DENTRO del WebView, que son ~15 s
+            // más de arranque y no da PiP ni el reproductor nativo.
+            //
+            // Coste de las dos rutas, medido: directa = 2 POST y un `load` de
+            // ExoPlayer; embed = 2 POST + 30 s de sondeo + un WebView con su
+            // `<video>` dentro. Con el mismo canal, la directa es la ruta corta.
+            //
+            // El riesgo lo cubre el plan B: si la directa no arranca, ExoPlayer
+            // dispara onPlayerError y ahí se prueba el embed (PlayerActivity §1820).
+            if (siYaEsStream(vg[0]) && !esAvisoSinCanal(vg[0])) {
+                Log.d(TAG, "resolverVivo: glasbi dio el stream directo — se usa YA"
+                        + " (la embebida queda de plan B)");
+                return new Vivo(vg[0], vg[1] == null ? "" : vg[1],
+                        vg.length > 2 ? vg[2] : "[]");
+            }
+            // Sin directa de glasbi: la embebida es lo mejor que hay (ordernap sí
+            // emite cuando la directa es un 403 de Cloudflare o la tarjeta rusa).
+            String embebida = primeraEmbebida(vg.length > 2 ? vg[2] : null);
+            if (embebida != null) {
+                Log.d(TAG, "resolverVivo: sin directa; hay embebida, se prefiere -> " + embebida);
+                return new Vivo(embebida, "",
+                        vg.length > 2 ? vg[2] : "[]");
+            }
+            ra = glbrCon(sesionJson, glt, wire, pr[0], vg);
+            if (ra == null) {
                     // v7.37.15: el glbr esta MUERTO y glasbi no trajo stream directo.
                     // Se devuelven IGUAL las opciones que glasbi si dio, para que el
                     // plan B las pruebe en vez de abrir la home de dramalive. Medido

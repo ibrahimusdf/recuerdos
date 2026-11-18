@@ -729,9 +729,9 @@ public class PlayerActivity extends AppCompatActivity {
                             if (planB != null) {
                                 log("relleno -> plan B: " + planB.etiqueta());
                                 urlIframeInicial = planB.url;
-                                // directo al marco: la carrera de 4 estrategias no puede
-                                // con un embed y son 20 s de negro (ver resolverStream…)
-                                mostrarEmbedEnLaVentana(planB);
+                                // v7.38.6: si es directa va a ExoPlayer; el WebView solo
+                                // para páginas de embed (ver probarServidor)
+                                probarServidor(planB);
                                 return;
                             }
                             // Sin más servidores que probar no se miente: se dice tal cual
@@ -1917,7 +1917,7 @@ public class PlayerActivity extends AppCompatActivity {
                     errorRefreshCount = MAX_REFRESH_RETRIES;   // no insistir con el m3u8 muerto
                     try { player.stop(); } catch (Throwable ignored) { }
                     if (planB.tipo == DramaResolucion.Tipo.EMBEBIDA) {
-                        mostrarEmbedEnLaVentana(planB);
+                        probarServidor(planB);
                     } else {
                         // v7.38.4 — una DIRECTA con su UA y su Referer, no el UA de
                         // escritorio de siempre: el CDN del proveedor contesta 403 si
@@ -1940,7 +1940,7 @@ public class PlayerActivity extends AppCompatActivity {
                         lastRefreshTime = System.currentTimeMillis();
                         try { player.stop(); } catch (Throwable ignored) { }
                         if (otra.tipo == DramaResolucion.Tipo.EMBEBIDA) {
-                            mostrarEmbedEnLaVentana(otra);
+                            probarServidor(otra);
                         } else {
                             probarDirectaConSusCabeceras(otra);
                         }
@@ -2420,6 +2420,39 @@ public class PlayerActivity extends AppCompatActivity {
                 DramaResolucion.utiles(url, backup), probados, null, null);
     }
 
+    /**
+     * v7.38.6 — UN SOLO PUNTO DE ENTRADA para «prueba este servidor».
+     *
+     * <p><b>El defecto que arregla, medido en el logcat del usuario</b>
+     * (2026-11-17 19:02): el plan B metía TODO dentro del WebView, incluidas las
+     * <em>directas</em>. Cuando por fin llegó a {@code primetv…mono.tbin.m3u8} lo
+     * abrió como embed:
+     *
+     * <pre>
+     * 19:02:49  ✅ plan B: embed dentro de la ventana -> http://primetv…/mono.tbin.m3u8
+     * 19:02:51  plan B: embed cargado (100%)
+     * 19:03:04  hay imagen del embed (vídeo confirmado)      ← 15 s
+     * </pre>
+     *
+     * Un m3u8 no es un embed: ExoPlayer lo abre con {@code load} y está
+     * reproduciendo en 1-3 s, con PiP, con el mando de calidad y sin WebView. El
+     * WebView solo tiene sentido para una <em>página</em> de embed. Por eso unas
+     * líneas más abajo {@code revisarSiElStreamEsUnAviso} ya saltaba al embed…
+     * pero al revés no: una directa nunca volvía al player nativo.
+     */
+    private void probarServidor(DramaResolucion.Opcion opcion) {
+        if (opcion == null) { avisarSinStream(); return; }
+        if (!servidoresProbados.contains(opcion.url)) servidoresProbados.add(opcion.url);
+        if (opcion.tipo == DramaResolucion.Tipo.DIRECTA) {
+            log("\u21AA directa del canal -> ExoPlayer (no WebView): " + opcion.etiqueta());
+            urlIframeInicial = null;
+            mostrarChipCalidad();
+            probarDirectaConSusCabeceras(opcion);
+            return;
+        }
+        mostrarEmbedEnLaVentana(opcion);
+    }
+
     private void mostrarEmbedEnLaVentana(DramaResolucion.Opcion opcion) {
         if (opcion == null) { avisarSinStream(); return; }
         if (!servidoresProbados.contains(opcion.url)) servidoresProbados.add(opcion.url);
@@ -2520,7 +2553,7 @@ public class PlayerActivity extends AppCompatActivity {
                 if (siguiente != null) {
                     log("plan B: probando -> " + siguiente.etiqueta());
                     segundaOportunidadDada = false;
-                    mostrarEmbedEnLaVentana(siguiente);
+                    probarServidor(siguiente);
                 } else {
                     log("plan B: se han probado TODOS los servidores del canal");
                 }
@@ -2553,7 +2586,7 @@ public class PlayerActivity extends AppCompatActivity {
         if (siguiente != null) {
             log("plan B: probando -> " + siguiente.etiqueta());
             segundaOportunidadDada = false;
-            mostrarEmbedEnLaVentana(siguiente);
+            probarServidor(siguiente);
         } else {
             log("plan B: se han probado TODOS los servidores del canal");
             avisarSinStream();
@@ -2801,7 +2834,16 @@ public class PlayerActivity extends AppCompatActivity {
         final String embebida = elegida;
         if (embebida != null && !embeddedEnVentana && !isFinishing()) {
             log("↩️ sin stream nativo; se prueba el embed en la ventana -> " + embebida);
-            mostrarEmbedEnLaVentana(embebida);
+            // v7.38.6: por el despachador — si resultó ser una DIRECTA, a ExoPlayer.
+            probarServidor(buscarOpcion(embebida));
+            return;
+        }
+        // v7.38.6: y si ya no queda embed, los servidores del backup que no se han
+        // probado (antes se rendía aquí sin mirarlos).
+        DramaResolucion.Opcion queda = siguienteOpcionUtil();
+        if (queda != null && !isFinishing()) {
+            log("↩️ sin stream nativo; queda un servidor por probar -> " + queda.etiqueta());
+            probarServidor(queda);
             return;
         }
         runOnUiThread(() -> {
