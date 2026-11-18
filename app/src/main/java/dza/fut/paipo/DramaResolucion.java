@@ -155,6 +155,32 @@ public final class DramaResolucion {
     }
 
     /**
+     * v7.38.10 — ¿es un host de la cadena de Drama? (los que publican el manifiesto
+     * dentro de un {@code index.html}).
+     *
+     * <p>Medido el 2026-11-18: la cadena rota los dominios cada pocos días
+     * ({@code superdatanet}, {@code maxcontenthub}, {@code maxwordsandroidios},
+     * {@code datahostingapiportal}, {@code rapidbackend}, {@code buildapiplatform},
+     * {@code ultraiossoftstarsfeedmoon}…). Una lista cerrada caducaría, así que se
+     * reconoce por la FORMA de la url, que sí se mantiene: {@code /hd/…}, {@code /fk/…},
+     * {@code /sd/…}, {@code /pages/…}, {@code /mirsp/…} — y siempre un
+     * {@code index.html} al final.</p>
+     */
+    public static boolean esHostDeLaCadena(@Nullable String u) {
+        if (u == null) return false;
+        String l = u.toLowerCase(Locale.ROOT);
+        // v7.38.10 — el sitio de Drama SÍ es la cadena, pero la API NO: su
+        // `/p/…`/`/ps/…` es un proxy, no un `index.html`. Antes `contains("dramalive")`
+        // a secas marcaba el proxy como host de la cadena y lo mandaba a ExoPlayer por
+        // el camino equivocado. Los proxies se reconocen porque traen `/p/` o `/ps/`
+        // justo después del host.
+        if (l.contains("dramalive")) return !l.matches("^https?://[^/]+/(p|ps)/.*");
+        boolean formaDeLaCadena = l.contains("/hd/") || l.contains("/fk/")
+                || l.contains("/sd/") || l.contains("/pages/") || l.contains("/mirsp/");
+        return formaDeLaCadena && l.contains("index.html");
+    }
+
+    /**
      * v7.38.9 — <b>¿esta opción no es vídeo, sino una página web disfrazada de canal?</b>
      *
      * <p>Medido con la API el 2026-11-18: {@code live_tv_beinsportnews} trae como opción
@@ -172,9 +198,33 @@ public final class DramaResolucion {
     public static boolean esPaginaDePortal(@Nullable String u) {
         if (u == null) return false;
         String l = u.toLowerCase(Locale.ROOT);
+        // v7.38.10 — un host de la cadena SÍ se abre (ahí vive el manifiesto), así que
+        // nunca cuenta como portal aunque la url traiga cosas raras.
+        if (esHostDeLaCadena(l)) return false;
         return l.contains("youtube.com") || l.contains("youtu.be")
                 || l.contains("vimeo.com") || l.contains("dailymotion.com")
-                || l.contains("twitch.tv") || l.contains("facebook.com/watch");
+                || l.contains("twitch.tv") || l.contains("facebook.com/watch")
+                // portales árabes que traen como «opción» una web con su propio reproductor
+                || l.contains("shoof.") || l.contains("alkass.net/live")
+                || l.contains("aflam4you") || l.contains("dlive.sx/cast");
+    }
+
+    /**
+     * v7.38.10 — ¿hay que abrir esta página en el WebView (capturar el manifiesto) en vez
+     * de mandarla a ExoPlayer?
+     *
+     * <p><b>El fallo que arregla.</b> Medido con {@code live_tv_beinsport1max}: la opción
+     * que la API confirma como emisora (la única sana) es
+     * {@code max10.maxwordsandroidios.shop/pages/…/index.html}. La app la metía en el
+     * WebView… y la página se iba a su propio reproductor, que no da el manifiesto sin
+     * sesión. Mientras tanto, las otra cinco opciones son Widevine o 403: el canal se
+     * queda en negro aunque quede «un servidor bueno», que es justo lo que el usuario ve.</p>
+     *
+     * <p>A un host de la cadena el manifiesto se le pide <b>directamente</b> (su
+     * {@code index.html} responde {@code #EXTM3U}, medido).</p>
+     */
+    public static boolean abreEnExoPlayerDirecto(@Nullable String u) {
+        return esHostDeLaCadena(u);
     }
 
     /**

@@ -47,18 +47,19 @@ public class CanalesQueNoAbrenTest {
             + "\"url\":\"https://admn-live-cdn-lb.starzplayarabia.com/out/v1/admn_tv_enc/emarat_tv/emarat_tv_hls_nd/index.m3u8\","
             + "\"headers\":{},\"emite\":false,\"hls\":false,\"content_type\":\"application/json\",\"http\":403}]}";
 
+    /**
+     * v7.38.10 — CORRECCIÓN. En la 7.38.9 esta prueba exigía rescatar los dos {@code .mpd}
+     * de Abu Dhabi. Estaba mal: son {@code ..._dash_enc/index.mpd} cifrados en Widevine y
+     * no se abren sin licencia. Ver {@link DashCifradoYCadenaTest}. Se deja la prueba,
+     * invertida, para que el error no pueda volver sin que salte.
+     */
     @Test
-    public void unDashQueEmiteNoSeTira() {
+    public void losDashCifradosDeAbuDhabiAhoraSeDescartan() {
         ApiDrama.Opciones o = ApiDrama.leerOpciones(JSON_ABUDABI);
         assertNotNull(o);
         assertEquals("la API dice que no emite nadie", 0, o.emitiendo);
-        assertEquals("pero ninguna confirmada", 0, o.confirmadas().size());
-
-        List<ApiDrama.OpcionApi> utiles = o.queEmiten();
-        assertEquals("se rescatan las dos mpd, no la que da 403", 2, utiles.size());
-        for (ApiDrama.OpcionApi x : utiles) {
-            assertTrue("debe ser DASH: " + x.url, x.url.endsWith(".mpd"));
-        }
+        assertEquals("y ninguna se rescata: son CENC", 0, o.confirmadas().size());
+        assertEquals("ni dudosas: Widevine y 403", 0, o.queEmiten().size());
     }
 
     @Test
@@ -68,22 +69,13 @@ public class CanalesQueNoAbrenTest {
         }
     }
 
+    /** v7.38.10 — y por eso el plan de Abu Dhabi queda vacío en vez de con 2 cifrados. */
     @Test
-    public void elDashLlegaAlPlanBComoDirecta() {
+    public void elDashCifradoNoLlegaAlPlanB() {
         List<DramaResolucion.Opcion> ops =
                 ApiDrama.aOpciones(BASE, CODIGO, "live_tv_abudabyuae",
                         ApiDrama.leerOpciones(JSON_ABUDABI));
-        boolean hayDash = false;
-        for (DramaResolucion.Opcion x : ops) {
-            if (x.url.endsWith(".mpd")) {
-                hayDash = true;
-                assertEquals("un .mpd lo abre ExoPlayer directo",
-                        DramaResolucion.Tipo.DIRECTA, x.tipo);
-            }
-            assertFalse("no se pide proxy para lo que no es HLS",
-                    x.url.contains("/p/232425/"));
-        }
-        assertTrue("el DASH debe sobrevivir al filtro", hayDash);
+        assertTrue("nada que probar es mejor que 2 imposibles", ops.isEmpty());
     }
 
     // ───────────── causa 2: el proxy no sirve para lo que no es HLS ─────────────
@@ -187,16 +179,17 @@ public class CanalesQueNoAbrenTest {
         List<DramaResolucion.Opcion> confirmadas = new ArrayList<>(Arrays.asList(
                 new DramaResolucion.Opcion(BASE + "/p/232425/live_tv_x/1.m3u8",
                         DramaResolucion.Tipo.DIRECTA, null, null, "", false)));
+        // v7.38.10: una dudosa que NO sea un manifiesto cifrado (un .mpd CENC ya se
+        // descarta antes de llegar aquí, en ApiDrama).
         List<DramaResolucion.Opcion> dudosas = new ArrayList<>(Arrays.asList(
-                new DramaResolucion.Opcion(
-                        "https://admn-live-cdn-lb.starzplayarabia.com/x/index.mpd",
-                        DramaResolucion.Tipo.DIRECTA, null, null, "", false)));
+                new DramaResolucion.Opcion("https://x/pagina-con-el-stream/index.html",
+                        DramaResolucion.Tipo.EMBEBIDA, null, null, "", true)));
         List<DramaResolucion.Opcion> todas = new ArrayList<>(confirmadas);
         todas.addAll(dudosas);
 
         List<DramaResolucion.Opcion> plan = DramaResolucion.planDeAtaque(null, todas, null);
         assertEquals(2, plan.size());
         assertTrue("lo confirmado va primero", plan.get(0).url.contains("/p/"));
-        assertTrue("el DASH queda de reserva", plan.get(1).url.endsWith(".mpd"));
+        assertTrue("la dudosa queda de reserva", plan.get(1).url.contains("pagina-con-el-stream"));
     }
 }

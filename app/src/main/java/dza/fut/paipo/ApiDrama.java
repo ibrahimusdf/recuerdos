@@ -146,11 +146,41 @@ final class ApiDrama {
             if (sirve()) return true;
             if (url == null || !url.startsWith("http")) return false;
             if (http == 403 || http == 404 || http == 410) return false;
-            // Un 2xx con cuerpo: la API no supo leerlo, pero algo hay.
-            if (http >= 200 && http < 300) return true;
-            // DASH declarado: aunque el sondeo de la API haya fallado, se prueba.
+            // v7.38.10 — CORRECCIÓN de la v7.38.9. En la 7.38.9 rescataba cualquier
+            // ".mpd" con 2xx. Estaba mal: medido el 2026-11-18, esos .mpd son
+            // "cenc.mpd" / "..._dash_enc/index.mpd" y van cifrados en Widevine, que no
+            // se puede abrir sin licencia. El propio diagnóstico del proyecto
+            // (docs/DIAGNOSTICO-CANALES-DRAMA-v7.38.3.md) ya lo decía: "los de
+            // starzplay son Widevine (imposible con clave suelta)". Meterlos en el plan
+            // solo gasta turnos. Se quedan fuera.
+            if (esDashCifrado()) return false;
+            // Un 2xx con cuerpo que NO es un manifiesto cifrado: la API no supo leerlo
+            // (p. ej. una página .html con el stream dentro). Eso sí vale la pena.
+            return http >= 200 && http < 300;
+        }
+
+        /**
+         * v7.38.10 — ¿este DASH va cifrado (y por tanto no lo podemos abrir)?
+         *
+         * <p>Dos señales, las dos medidas: el nombre ({@code cenc}, {@code _enc},
+         * {@code _drm}) y que sea un {@code .mpd} pasando por un CDN que sirve CENC
+         * (starzplay/intigral/otte). Ninguno de estos canales publica ClearKey: sin
+         * licencia Widevine no hay nada que hacer, y fingir lo contrario es lo que
+         * gastaba turnos en la 7.38.9.</p>
+         */
+        boolean esDashCifrado() {
+            if (url == null) return false;
             String l = url.toLowerCase(Locale.ROOT);
-            return l.contains(".mpd") || l.contains(".m3u8");
+            if (!l.contains(".mpd")) return false;
+            // v7.38.10 — dos señales más, medidas en los .mpd reales de esta API:
+            //  · `intigral-ott.net/…/manifest.mpd` es CENC de starzplay igual que los
+            //    demás (misma plataforma, sin "cenc" en la ruta).
+            //  · HTTP 299 no es un estado que use un CDN para un manifiesto válido; en
+            //    esta API aparece justo en ese .mpd cifrado.
+            if (http == 299) return true;
+            if (l.contains("starzplay") || l.contains("intigral")) return true;
+            return l.contains("cenc") || l.contains("_enc") || l.contains("_drm")
+                    || l.contains("/dash/enc/") || l.contains("dash_enc");
         }
     }
 
@@ -286,6 +316,12 @@ final class ApiDrama {
             // v7.38.9 — un portal (YouTube & cía) nunca entrega el canal a un WebView sin
             // sesión: no merece ocupar un turno del plan B. Se corta aquí, en origen.
             if (DramaResolucion.esPaginaDePortal(x.url)) continue;
+            if (x.esDashCifrado()) {
+                // Se deja constancia en el log: antes esto era un turno perdido.
+                android.util.Log.d(TAG, "api drama: [" + x.n + "] DASH cifrado (Widevine), "
+                        + "no se puede abrir sin licencia: " + x.url);
+                continue;
+            }
             boolean confirmada = x.sirve();
             // v7.38.9 — la proxada SOLO para lo que la API confirmó como HLS. Su proxy
             // contesta «esa opción no es un manifiesto HLS (usa su URL directa)» a todo

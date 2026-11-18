@@ -2615,6 +2615,21 @@ public class PlayerActivity extends AppCompatActivity {
     private void probarServidor(DramaResolucion.Opcion opcion) {
         if (opcion == null) { avisarSinStream(); return; }
         if (!servidoresProbados.contains(opcion.url)) servidoresProbados.add(opcion.url);
+        // v7.38.10 — un host de la cadena va DIRECTO a ExoPlayer, aunque la opción venga
+        // marcada como EMBEBIDA/página. Medido con beIN Max 1: su única opción sana era
+        // un /pages/…/index.html; el WebView se lo llevaba al reproductor del sitio y no
+        // devolvía el manifiesto, así que el canal se quedaba en negro. Al mismo host se
+        // le pide el manifiesto y responde #EXTM3U (medido), así que no hay nada que
+        // capturar.
+        if (DramaResolucion.abreEnExoPlayerDirecto(opcion.url)) {
+            log("\u21AA host de la cadena -> ExoPlayer directo (no WebView): " + opcion.url);
+            DramaResolucion.Opcion comoDirecta = DramaResolucion.directaCon(
+                    opcion.url, opcion.ua, opcion.referer);
+            urlIframeInicial = null;
+            mostrarChipCalidad();
+            probarDirectaConSusCabeceras(comoDirecta);
+            return;
+        }
         if (opcion.tipo == DramaResolucion.Tipo.DIRECTA) {
             log("\u21AA directa del canal -> ExoPlayer (no WebView): " + opcion.etiqueta());
             urlIframeInicial = null;
