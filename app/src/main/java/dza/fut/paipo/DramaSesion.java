@@ -716,12 +716,35 @@ public final class DramaSesion {
      *  contestado 201. Pero el propio {@code backup} trae servidores directos
      *  ({@code http://primetv.cc.cd/…/mono.tbin.m3u8 -- Mozilla}), separados por
      *  {@code " -;- "}. Se devuelve el primero que sea un stream real, con su agente. */
+    /**
+     * v7.38.4 — UN SOLO parser del {@code live.backup}.
+     *
+     * <p><b>El defecto.</b> El campo llegaba separado por {@code " -;- "} y había dos
+     * parseadores con criterios distintos: este (y {@code opcionesDeLive}) partían con
+     * la cadena LITERAL {@code bk.split(" -;- ")}, mientras
+     * {@link DramaResolucion#opciones} partía con la expresión {@code \s*-;-\s*}. Un
+     * backup con dos espacios, un salto de línea o un {@code -;-} sin espacios dejaba
+     * al chip de calidad con UN servidor y al plan B con OCHO — el mismo canal, dos
+     * respuestas distintas según por dónde se mirara. Ahora todos leen por aquí.
+     */
+    @NonNull
+    public static java.util.List<String> trozosDeBackup(@Nullable String backup) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (backup == null) return out;
+        for (String p : backup.split("\\s*-;-\\s*")) {
+            if (p == null) continue;
+            String t = p.trim();
+            if (!t.isEmpty()) out.add(t);
+        }
+        return out;
+    }
+
     @Nullable
     public static String[] directaDeBackup(@Nullable JsonObject live) {
         if (live == null) return null;
         String bk = texto(live, "backup");
         if (bk == null || bk.trim().isEmpty()) return null;
-        for (String p : bk.split(" -;- ")) {
+        for (String p : trozosDeBackup(bk)) {
             if (p == null) continue;
             String t = p.trim();
             if (t.isEmpty()) continue;
@@ -792,8 +815,16 @@ public final class DramaSesion {
                 if (!e.isJsonObject()) continue;
                 String u = texto(e.getAsJsonObject(), "u");
                 if (u == null || !u.startsWith("http")) continue;
-                String l = u.toLowerCase(java.util.Locale.ROOT);
-                if (l.contains("ordernap.")) return u;   // el único que emite
+                // v7.38.4 — AQUÍ ESTABA CLAVADO A MANO `if (l.contains("ordernap."))`.
+                // Consecuencia medida: si el proveedor rota de dominio de embed (ya
+                // pasó: quotarevival murió, ordernap es el bueno de hoy) TODOS los
+                // canales se quedaban sin su vía buena y caían al glbr/relleno, y un
+                // canal con una embebida nueva (cualquier /e/…) la veía ignorada
+                // aunque DramaResolucion.esEmbebida() sí supiera reconocerla.
+                // Ahora manda el clasificador que ya existe, y la lista negra de
+                // embeds muertos vive en UN solo sitio (esEmbedMuerto).
+                if (esEmbedMuerto(u)) continue;
+                if (DramaResolucion.clasificar(u, false) == DramaResolucion.Tipo.EMBEBIDA) return u;
             }
         } catch (Exception ignore) { }
         return null;
@@ -829,9 +860,9 @@ public final class DramaSesion {
                 if (u == null || !u.startsWith("http")) continue;
                 if (actual != null && actual.equals(u)) { pasado = true; continue; }
                 if (!pasado) continue;
-                String l = u.toLowerCase(java.util.Locale.ROOT);
-                if (!l.contains("ordernap.") && !l.contains("quotarevival.")) continue;
+                // v7.38.4: mismo criterio que primeraEmbebida — clasificador, no dominio.
                 if (esEmbedMuerto(u)) continue;
+                if (DramaResolucion.clasificar(u, false) != DramaResolucion.Tipo.EMBEBIDA) continue;
                 return u;
             }
         } catch (Exception ignore) { }
@@ -1264,8 +1295,8 @@ public final class DramaSesion {
         java.util.List<String> cand = new java.util.ArrayList<>();
         String pri = texto(live, "url");
         if (pri != null) cand.add(pri.trim());
-        String bk = texto(live, "backup");
-        if (bk != null) for (String p : bk.split(" -;- ")) if (p != null) cand.add(p.trim());
+        // v7.38.4: mismo parser que el plan B (antes este partía por " -;- " literal)
+        cand.addAll(trozosDeBackup(texto(live, "backup")));
         java.util.LinkedHashSet<String> vistos = new java.util.LinkedHashSet<>();
         for (String m : cand) {
             if (m == null || m.isEmpty()) continue;
@@ -1458,6 +1489,13 @@ public final class DramaSesion {
         try {
             String[] pr = partesDramaLive(canalUrl);
             if (pr == null) return null;
+            // v7.38.4 — si resolverVivo acaba de preguntar por este mismo canal, la
+            // respuesta ya está en la caché y NO se repite el POST (ver TTL_LIVE_MS).
+            JsonObject cacheado = liveEnCache(pr[0]);
+            if (cacheado != null) {
+                Log.d(TAG, "glasbiCrudo: servidores del canal desde la cache (0 POST)");
+                return cacheado;
+            }
             JsonObject glt = gltDe(sesionJson);
             if (glt == null) return null;
             String wire = wireDe(sesionJson);
@@ -1471,7 +1509,9 @@ public final class DramaSesion {
             JsonObject jo = r.getAsJsonObject();
             if (optInt(jo, "result", -1) != 0) return null;
             JsonElement lv = jo.get("live");
-            return (lv != null && lv.isJsonObject()) ? lv.getAsJsonObject() : null;
+            if (lv == null || !lv.isJsonObject()) return null;
+            recordarLive(pr[0], lv.getAsJsonObject());   // v7.38.4: sirve al siguiente consumidor
+            return lv.getAsJsonObject();
         } catch (Exception e) {
             return null;
         }
@@ -1493,12 +1533,70 @@ public final class DramaSesion {
 
     /** Un intento de glasbi: POST, desalambrado y lectura del bloque 'live'. */
     @Nullable
+    /**
+     * v7.38.4 — CACHÉ CORTA del bloque {@code live} en crudo, por canal.
+     *
+     * <p><b>Qué arregla.</b> {@code PlayerActivity} hace DOS peticiones idénticas a
+     * glasbi por cada play: {@link #resolverVivo} (que ya trae el {@code live}) y
+     * acto seguido {@link #glasbiCrudo} desde {@code cargarServidoresDelCanal} para
+     * montar el plan B. Con reintentos son hasta TRES POST al mismo endpoint por
+     * canal. El propio histórico del proyecto documenta el castigo del edge: «98
+     * POST a la API en 13 s → el servidor empezó a contestar 32 bytes en blanco a
+     * todo» (docs/COMO_SESION_DRAMA.md, v3.2.11). Ahorrar el duplicado no es
+     * cosmético: es proteger la cuenta del usuario.</p>
+     *
+     * <p>Es la optimización que estaba a medias: {@code Vivo.crudoUrl} y
+     * {@code Vivo.crudoBackup} se declararon en la v7.38.0 y los cuatro
+     * {@code new Vivo(...)} usan el constructor de 3 argumentos, así que siempre
+     * valían {@code null}. En vez de enhebrar dos campos por media clase, se cachea
+     * el JSON completo con TTL corto: sirve para cualquier consumidor futuro.</p>
+     */
+    private static final long TTL_LIVE_MS = 20_000L;
+    private static final java.util.Map<String, Object[]> LIVE_CRUDO =
+            new java.util.concurrent.ConcurrentHashMap<>();   // id → {ts, JsonObject}
+
+    /** Lo que glasbi dijo de este canal hace menos de 20 s, si está. Solo lectura. */
+    @Nullable
+    private static JsonObject liveEnCache(@NonNull String id) {
+        Object[] v = LIVE_CRUDO.get(id);
+        if (v == null) return null;
+        long ts = (Long) v[0];
+        if (System.currentTimeMillis() - ts > TTL_LIVE_MS) {
+            LIVE_CRUDO.remove(id);
+            return null;
+        }
+        return (JsonObject) v[1];
+    }
+
+    /** El bloque {@code live} desencriptado de este intento, para las próximas 20 s. */
+    private static void recordarLive(@NonNull String id, @Nullable JsonObject live) {
+        if (live == null) return;
+        if (LIVE_CRUDO.size() > 64) LIVE_CRUDO.clear();   // no crecer sin freno
+        LIVE_CRUDO.put(id, new Object[]{ System.currentTimeMillis(), live });
+    }
+
     private static String[] glasbiIntento(@NonNull String url, @NonNull JsonObject payload,
                                           @NonNull String wire, @NonNull String etiqueta) {
         try {
             Respuesta rg = post(url, alambre(payload, wire));
             Log.d(TAG, "glasbi [" + etiqueta + "] HTTP " + rg.status + " · "
                     + (rg.cuerpo == null ? 0 : rg.cuerpo.length) + " B");
+            // v7.38.4: si esta respuesta trae el bloque live, se guarda para que el
+            // plan B no tenga que volver a preguntar lo mismo 200 ms después.
+            try {
+                String crudo = rg.cuerpo == null ? null
+                        : desalambre(new String(rg.cuerpo, StandardCharsets.ISO_8859_1));
+                if (crudo != null && !crudo.trim().isEmpty()) {
+                    JsonElement rr = JsonParser.parseString(crudo);
+                    if (rr.isJsonObject() && optInt(rr.getAsJsonObject(), "result", -1) == 0) {
+                        JsonElement lv = rr.getAsJsonObject().get("live");
+                        if (lv != null && lv.isJsonObject()) {
+                            String idCanal = texto(payload, "id");
+                            if (idCanal != null) recordarLive(idCanal, lv.getAsJsonObject());
+                        }
+                    }
+                }
+            } catch (Exception ignoreCache) { }
             String claroG = rg.cuerpo == null ? null
                     : desalambre(new String(rg.cuerpo, StandardCharsets.ISO_8859_1));
             if (claroG == null || claroG.trim().isEmpty()) {

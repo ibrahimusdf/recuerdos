@@ -94,11 +94,11 @@ public final class DramaResolucion {
     public static List<Opcion> opciones(@Nullable String url, @Nullable String backup) {
         List<Opcion> todas = new ArrayList<>();
         if (url != null && !url.trim().isEmpty()) todas.add(deTexto(url.trim(), null, null));
-        if (backup != null) {
-            for (String trozo : backup.split("\\s*-;-\\s*")) {
-                Opcion o = deTrozo(trozo);
-                if (o != null) todas.add(o);
-            }
+        // v7.38.4: el troceado del backup vive en un solo sitio (DramaSesion), para
+        // que el chip de calidad y el plan B no vean listas distintas del mismo canal.
+        for (String trozo : DramaSesion.trozosDeBackup(backup)) {
+            Opcion o = deTrozo(trozo);
+            if (o != null) todas.add(o);
         }
         return ordenarSinRepetir(todas);
     }
@@ -135,6 +135,44 @@ public final class DramaResolucion {
             if (o.tipo != Tipo.EMBEBIDA) continue;
             if (actual != null && actual.equals(o.url)) { pasado = true; continue; }
             if (!pasado) continue;
+            return o;
+        }
+        return null;
+    }
+
+    /**
+     * v7.38.4 — EL SIGUIENTE SERVIDOR DE VERDAD: salta los ya probados y devuelve
+     * el primero que quede, en el orden de {@link #utiles}.
+     *
+     * <p><b>Qué arregla.</b> Esta decisión vivía en {@code PlayerActivity} con un
+     * {@code return null} dentro del bucle: al encontrarse un servidor ya probado
+     * <em>abortaba la lista completa</em> en vez de saltarlo. Con la lista ordenada
+     * por {@code utiles} — que pone las EMBEBIDAS primero — el canal se quedaba en
+     * cero después de intentar <b>solo el primer</b> servidor, y el log decía «se
+     * han probado TODOS los servidores» con siete/ocho sin abrir. Ese síntoma es
+     * «pulso el canal y no reproduce».
+     *
+     * <p>Se trae aquí porque es aritmética pura y se prueba en JVM
+     * ({@code PlanBTest}); una Activity de 4 000 líneas no es sitio para una regla
+     * que decide si un canal se ve o no.
+     *
+     * @param utiles      los servidores del canal, ya ordenados ({@link #utiles})
+     * @param yaProbados  urls que este reproductor ya intentó (no se repiten)
+     * @param actual      url que está sonando ahora mismo (no se repite)
+     * @param enCurso     la embebida que se está mostrando (no se repite)
+     * @return el primero no descartado, o {@code null} si de verdad no queda ninguno
+     */
+    @Nullable
+    public static Opcion siguiente(@Nullable List<Opcion> utiles,
+                                   @Nullable java.util.Collection<String> yaProbados,
+                                   @Nullable String actual,
+                                   @Nullable String enCurso) {
+        if (utiles == null || utiles.isEmpty()) return null;
+        for (Opcion o : utiles) {
+            if (o == null || o.url == null) continue;
+            if (actual != null && actual.equals(o.url)) continue;
+            if (enCurso != null && enCurso.equals(o.url)) continue;
+            if (yaProbados != null && yaProbados.contains(o.url)) continue;   // saltar, NO abortar
             return o;
         }
         return null;

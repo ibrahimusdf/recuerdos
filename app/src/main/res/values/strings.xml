@@ -52,7 +52,11 @@
     <string name="player_volume">Volumen</string>
     <string name="player_mute">Silenciar</string>
     <string name="player_unmute">Activar sonido</string>
-    <string name="player_error_relleno">Servidor no disponible por ahora</string>
+    <!-- v7.38.4 — este texto se leia como «la app esta rota» y ademas se usaba para
+         DOS casos distintos (el clip de relleno y «no queda ningun servidor»).
+         Ahora dice que se esta probando, que es la verdad y ademas informa. -->
+    <string name="player_error_relleno">Ese servidor no emitió ahora; probando otro…</string>
+    <string name="player_sin_mas_servidores">No queda ningún servidor de este canal. Se cura solo en segundo plano.</string>
     <string name="player_refresh">Refrescar stream</string>
     <string name="player_pip">Picture-in-Picture</string>
     <string name="player_servidores">Servidores:</string>

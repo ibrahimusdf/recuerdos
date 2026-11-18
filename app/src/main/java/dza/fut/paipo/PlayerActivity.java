@@ -470,6 +470,61 @@ public class PlayerActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * v7.38.4 — MARCA EL CANAL PARA LA CURA Y LA LANZA. Antes no existía: el campo
+     * {@code canalCurado} se declaraba y <b>nunca</b> recibía un valor distinto de
+     * {@code null} (4 asignaciones en todo el fichero, las 4 a {@code null}), así
+     * que toda la máquina de auto-curación quedaba inerte:
+     *
+     * <ul>
+     *   <li>{@link #reintentaTrasCura()} retornaba en su PRIMERA línea
+     *       ({@code canalCurado == null});</li>
+     *   <li>{@code notificarEntrega()} (v3.2.21, «despierto al player ya») exigía
+     *       {@code canalCurado != null} → nunca despertaba a nadie;</li>
+     *   <li>{@code notificarCuraFracasada()} comparaba contra {@code null} → nunca
+     *       coincidía.</li>
+     * </ul>
+     *
+     * <p>Y {@link DramaFondo#abrirCaptadorHeadless} — la ventana 2x2 invisible que
+     * ejecuta la cosecha — se quedó sin un solo llamador. La documentación
+     * (docs/COMO_SESION_DRAMA.md v3.2.13→v3.2.47) describía un flujo que el código
+     * ya no ejecutaba.</p>
+     *
+     * <p><b>Lo que NO se repone:</b> el salto al captador VISIBLE a pantalla
+     * completa (los «tres caminos» que se retiraron en v3.2.46/v3.2.47 tras la
+     * queja del usuario). Aquí solo se lanza el headless, con el tope de ciclos
+     * intacto y el cooldown de 100 s por canal.</p>
+     */
+    private void lanzarCuraDelCanal(@Nullable String canal) {
+        String pid = DramaSesion.idDeCanal(canal);
+        if (pid == null || pid.isEmpty()) {
+            log("cura: sin id_live (canal no viene de Drama) — no hay que curar nada");
+            return;
+        }
+        if (quemadosHeadless.containsKey(pid)) {
+            log("cura: " + pid + " ya se quemo en este proceso (server terco con el sueno)");
+            return;
+        }
+        long ahora = System.currentTimeMillis();
+        if (DramaSesion.curaFresca(curaTsMap, pid, ahora, 100_000L)) {
+            log("cura: " + pid + " tiene una cura fresca (<100 s) — no se relanza");
+            return;
+        }
+        canalCurado = pid;
+        curaCiclos = 0;
+        curaTsMap.put(pid, ahora);
+        log("cura LANZADA para " + pid + " — cosecha headless (invisible) + reintento a 70 s");
+        try {
+            DramaFondo.abrirCaptadorHeadless(this);
+        } catch (Throwable t) {
+            log("cura: no se pudo abrir el captador — " + t.getMessage());
+            canalCurado = null;
+            return;
+        }
+        mainHandler.removeCallbacks(curaReintentoRun);
+        mainHandler.postDelayed(curaReintentoRun, 70_000L);
+    }
+
     private void reintentaTrasCura() {
         if (isFinishing() || canalCurado == null) return;
         String filaUrl = null;
@@ -642,7 +697,7 @@ public class PlayerActivity extends AppCompatActivity {
                         log("glbr resuelto -> " + rr[0]);
                         mostrarChipCalidad();
                         if (rr[0].contains("update.mp4")) {
-                            RegistroCarga.paso("FALLO: clip de relleno update.mp4");
+                            RegistroCarga.paso("glbr devolvio relleno: se prueban los servidores del canal");
                             RegistroCarga.fin();
                             streamReady = false;
                             if (player != null) {
@@ -653,9 +708,32 @@ public class PlayerActivity extends AppCompatActivity {
                             if (opcionesServidor.size() > 1) pintarChipsServidores();
                             mainHandler.removeCallbacks(curaReintentoRun);
                             canalCurado = null;
+                            // v7.38.4 — ESTA RAMA ERA UN CALLEJON SIN SALIDA, y es la
+                            // que el usuario vive a diario. Todas las demas (glbr fallo,
+                            // error de ExoPlayer, avisarSinStream) prueban el siguiente
+                            // servidor o el embed; esta solo mostraba «Servidor no
+                            // disponible por ahora» y hacia return. Pero el clip de
+                            // relleno es una respuesta LEGITIMA del edge al POST desde
+                            // Java (docs/COMO_SESION_DRAMA.md, v3.2.12) y el embed del
+                            // MISMO canal si emite: era justo el caso donde mas falta
+                            // hacia el plan B.
                             mostrarErrorPlayer(R.string.player_error_relleno);
+                            DramaResolucion.Opcion planB = siguienteOpcionUtil();
+                            if (planB != null) {
+                                log("relleno -> plan B: " + planB.etiqueta());
+                                urlIframeInicial = planB.url;
+                                // directo al marco: la carrera de 4 estrategias no puede
+                                // con un embed y son 20 s de negro (ver resolverStream...)
+                                mostrarEmbedEnLaVentana(planB);
+                                return;
+                            }
+                            // Sin mas servidores que probar no se miente: se dice tal cual
+                            // y se deja la cura en segundo plano (v7.38.4 la reactiva).
+                            log("relleno y sin mas servidores utiles: " + DramaResolucion.utiles(
+                                    streamUrl, streamBackup).size() + " en la lista");
                             showControls();
-                            log("glbr devolvio el clip de relleno; se conserva el video actual y solo se muestra el aviso");
+                            mostrarAvisoSinMasServidores();
+                            lanzarCuraDelCanal(canal);
                             return;
                         }
                         if (canalCurado != null) {  // v3.2.15: este canal ya curo — cancela el auto-reintento
@@ -1568,6 +1646,15 @@ public class PlayerActivity extends AppCompatActivity {
             return;
         }
         setIntent(intent);
+        // v7.38.4 — CANAL NUEVO, SERVIDORES VIEJOS. La Activity es
+        // launchMode="singleTask": al cambiar de canal por intent se reutiliza la
+        // instancia. `leerOpcionesDeIntent` limpia los chips, pero NO el estado de
+        // Drama: `streamUrl`/`streamBackup` son el `live` del canal ANTERIOR y
+        // `servidoresProbados` guarda las urls que ya se intentaron para ese otro
+        // canal. Si la resolución del canal nuevo falla, `siguienteOpcionUtil()`
+        // devolvía un servidor del canal viejo con su UA y su Referer → negro (o, con
+        // suerte, otro canal). Se limpia aquí, en un solo sitio.
+        limpiarEstadoDrama();
         leerOpcionesDeIntent(intent);   // v3.2.66: chips del canal recien llegado
         String tituloNuevo = intent.getStringExtra("canal_titulo");
         if (tituloNuevo != null) { tituloCanalActual = tituloNuevo; pintarTituloPlayer(); }
@@ -1985,6 +2072,15 @@ public class PlayerActivity extends AppCompatActivity {
         Toast.makeText(getApplicationContext(), mensajeResId, Toast.LENGTH_SHORT).show();
     }
 
+    /**
+     * v7.38.4 — el canal se quedó sin servidores que probar. Antes este caso decía
+     * exactamente lo mismo que el relleno («Servidor no disponible por ahora»), así
+     * que el usuario no podía distinguir «prueba otra vez» de «aquí no hay nada».
+     */
+    private void mostrarAvisoSinMasServidores() {
+        mostrarErrorPlayer(R.string.player_sin_mas_servidores);
+    }
+
     private void ocultarErrorPlayer() {
         mensajeErrorPlayerResId = 0;
     }
@@ -2249,17 +2345,23 @@ public class PlayerActivity extends AppCompatActivity {
      * Vuelve a la lista de servidores del canal y devuelve el siguiente que aún no
      * se haya probado: primero embebidas, luego directas. Sin repetir y sin
      * marcadores. Así no queda ningún servidor sin intentar.
+     *
+     * <p><b>v7.38.4 — EL BUG QUE DEJABA UN CANAL CON OCHO SERVIDORES A CERO.</b>
+     * Aquí había, dentro del bucle, un {@code if (o.url.equals(vista)) return null;}:
+     * al toparse con un servidor YA probado abortaba la lista entera en vez de
+     * saltarlo. La secuencia real de un canal de Drama es exactamente esa — el
+     * primero es una embebida, se abre, no arranca, se apunta en
+     * {@code servidoresProbados} y a la segunda vuelta {@code utiles.get(0)} es la
+     * misma → {@code null} → «se han probado TODOS los servidores» con siete sin
+     * abrir. La elección vive ahora en {@link DramaResolucion#siguiente} porque es
+     * pura y se prueba en JVM ({@code PlanBTest}).</p>
      */
     private DramaResolucion.Opcion siguienteOpcionUtil() {
-        List<DramaResolucion.Opcion> utiles =
-                DramaResolucion.utiles(streamUrl, streamBackup);
-        for (DramaResolucion.Opcion o : utiles) {
-            if (urlEnReproduccion != null && o.url.equals(urlEnReproduccion)) continue;
-            if (embedEnCurso != null && o.url.equals(embedEnCurso.url)) continue;
-            for (String vista : servidoresProbados) if (o.url.equals(vista)) return null;
-            return o;
-        }
-        return null;
+        return DramaResolucion.siguiente(
+                DramaResolucion.utiles(streamUrl, streamBackup),
+                servidoresProbados,
+                urlEnReproduccion,
+                embedEnCurso == null ? null : embedEnCurso.url);
     }
 
     private void mostrarEmbedEnLaVentana(DramaResolucion.Opcion opcion) {
@@ -2606,6 +2708,34 @@ public class PlayerActivity extends AppCompatActivity {
 
     /** Avisa al usuario de que este enlace no da stream, en vez de mostrarle una web. */
     private void avisarSinStream() {
+        // v7.37.16: antes de rendirse, si el canal trajo un embed (ordernap /
+        // quotarevival), se abre DENTRO de la ventana: está medido que así sí
+        // reproduce beIN 1, 2, 5, 6 y News. Solo si no hay embed se avisa.
+        //
+        // v7.38.4 — ESTE BLOQUE IBA DESPUÉS DEL DE ABAJO y era una REGRESIÓN de la
+        // 7.38.3: el aviso nuevo del marcador .LS. salía con un `return` ANTES de
+        // intentar el embed. Como `streamDirecto` conserva el marcador de la fila
+        // (`dramalive://` → `u=http://.LS.V2…`) aunque el canal TENGA embeds que sí
+        // emiten, la 7.38.3 dejó de probarlos: se quedaba en el toast. Una versión
+        // que reproduce MENOS que la anterior. El aviso de marcador pasa a ser el
+        // último recurso, después de haber probado lo que queda.
+        String elegida = DramaSesion.primeraEmbebida(streamOpcionesJson);
+        if (elegida == null) elegida = DramaSesion.primeraOpcionNoMarcador(streamOpcionesJson);
+        final String embebida = elegida;
+        if (embebida != null && !embeddedEnVentana && !isFinishing()) {
+            log("↩️ sin stream nativo; se prueba el embed en la ventana -> " + embebida);
+            mostrarEmbedEnLaVentana(embebida);
+            return;
+        }
+        // v7.38.4: y antes del aviso, cualquier servidor del backup que no se haya
+        // intentado todavía (el bug del `return null` hacía que casi nunca se llegara
+        // aquí con opciones vivas).
+        DramaResolucion.Opcion siguiente = siguienteOpcionUtil();
+        if (siguiente != null && !isFinishing()) {
+            log("↩️ sin stream nativo; queda un servidor por probar -> " + siguiente.etiqueta());
+            mostrarEmbedEnLaVentana(siguiente);
+            return;
+        }
         // v7.38.3 — marcador .LS.: el que resuelve es el proveedor, no el WebView.
         if (esMarcadorLs(streamDirecto) || esMarcadorLs(urlIframeInicial)) {
             log("🔒 canal con marcador .LS.: lo resuelve el redirector del proveedor "
@@ -2619,17 +2749,6 @@ public class PlayerActivity extends AppCompatActivity {
                             Toast.LENGTH_LONG).show();
                 } catch (Throwable ignored) { }
             });
-            return;
-        }
-        // v7.37.16: antes de rendirse, si el canal trajo un embed (ordernap /
-        // quotarevival), se abre DENTRO de la ventana: está medido que así sí
-        // reproduce beIN 1, 2, 5, 6 y News. Solo si no hay embed se avisa.
-        String elegida = DramaSesion.primeraEmbebida(streamOpcionesJson);
-        if (elegida == null) elegida = DramaSesion.primeraOpcionNoMarcador(streamOpcionesJson);
-        final String embebida = elegida;
-        if (embebida != null && !embeddedEnVentana && !isFinishing()) {
-            log("↩️ sin stream nativo; se prueba el embed en la ventana -> " + embebida);
-            mostrarEmbedEnLaVentana(embebida);
             return;
         }
         runOnUiThread(() -> {
@@ -3047,6 +3166,34 @@ public class PlayerActivity extends AppCompatActivity {
     // dzasports un error saltaba solo al siguiente servidor en silencio; aqui
     // NO: la opcion que agota sus reintentos queda marcada con una ✕ y el
     // usuario elige otra tocando su chip.
+
+    /**
+     * v7.38.4 — borra TODO lo que pertenece al canal anterior antes de abrir otro.
+     * La Activity es {@code singleTask}, así que sin esto el plan B podía sacar un
+     * servidor del canal de antes (con su UA y su Referer, que solo sirven para el
+     * otro) y el reproductor se quedaba en negro sin decir por qué.
+     */
+    private void limpiarEstadoDrama() {
+        streamUrl = null;
+        streamBackup = null;
+        streamOpcionesJson = null;
+        embedEnCurso = null;
+        playlistCazado = null;
+        playlistCazadoUa = null;
+        playlistCazadoReferer = null;
+        yaSeHizoNativo = false;
+        segundaOportunidadDada = false;
+        peticionesDeVideo = 0;
+        marcadorForzado = null;
+        agenteForzado = null;
+        calidadElegida = null;
+        if (servidoresProbados != null) servidoresProbados.clear();
+        if (canalCurado != null) {
+            mainHandler.removeCallbacks(curaReintentoRun);
+            canalCurado = null;
+            curaCiclos = 0;
+        }
+    }
 
     private void leerOpcionesDeIntent(Intent intent) {
         opcionesServidor.clear();
