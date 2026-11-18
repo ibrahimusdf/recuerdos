@@ -2612,6 +2612,59 @@ public class PlayerActivity extends AppCompatActivity {
         log("🧹 canal limpio (generación " + gen + ", " + motivo + ")");
     }
 
+    /**
+     * v7.39.2 — <b>quita el embed del plan B cuando llega un vídeo nativo.</b>
+     *
+     * <p>Antes el embed y el reproductor convivían: {@code embeddedEnVentana} seguía en
+     * {@code true} y el WebView seguía visible, así que el iframe tapaba el vídeo. Además su
+     * vigilante de 30 s seguía armado y, al saltar, cambiaba a otro «servidor» del plan B
+     * (en el logcat, a {@code http://.LS.V2daddy_91/s}). Al poner {@code embeddedEnVentana}
+     * en {@code false} el vigilante sale solo en su primera línea.</p>
+     */
+    private void retirarEmbedSiEstaba() {
+        if (!embeddedEnVentana) return;
+        embeddedEnVentana = false;
+        embedEnCurso = null;
+        peticionesDeVideo = 0;
+        videoDeEmbedAvanza = false;
+        segundaOportunidadDada = false;
+        log("🧽 el vídeo nativo manda: se retira el embed que estaba en la ventana");
+        try {
+            if (webViewFallback != null) {
+                webViewFallback.stopLoading();
+                webViewFallback.setVisibility(View.GONE);
+                webViewFallback.loadUrl("about:blank");
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * v7.39.2 — <b>¿ya hay algo puesto reproduciendo de verdad?</b>
+     *
+     * <p>Dos formas de «sí»: el reproductor nativo con imagen confirmada, o el embed del
+     * plan B dentro de la ventana con peticiones de vídeo. Si es que sí, no se le cambia
+     * la fuente al usuario por una ganadora que llega tarde.</p>
+     */
+    private boolean hayFuentePuestaYSonando() {
+        if (imagenConfirmada) return true;
+        return embeddedEnVentana && peticionesDeVideo > 0;
+    }
+
+    /**
+     * v7.39.2 — ¿el canal que se está viendo trae marcadores {@code .LS.} en su lista?
+     *
+     * <p>Esos no son servidores: son órdenes para el redirector del proveedor. Si el canal
+     * los trae, el plan B no puede ofrecerlos como si fueran urls (el logcat del usuario
+     * acabó metiendo {@code http://.LS.V2daddy_91/s} en el WebView, encima del vídeo que
+     * ya funcionaba).</p>
+     */
+    private boolean hayMarcadorEnLaLista() {
+        for (DramaResolucion.Opcion o : DramaResolucion.opciones(streamUrl, streamBackup)) {
+            if (esMarcadorLs(o.url)) return true;
+        }
+        return false;
+    }
+
     /** ¿Sigue siendo esta la generación que manda? Se pregunta en CADA vuelta asíncrona. */
     private boolean sigueVigente(int generacion) {
         return generacionDelCanal.vigente(generacion) && !isFinishing() && !carreraCancelada;
@@ -2827,6 +2880,17 @@ public class PlayerActivity extends AppCompatActivity {
         }
         if (imagenConfirmada) {
             log("🏁 la ganadora llega tarde (ya hay imagen): se ignora");
+            return;
+        }
+        // v7.39.2 — MEDIDO en el logcat del usuario (2026-11-18 13:49:23 → 13:49:24):
+        // la primera carrera terminó en «ninguna responde» y disparó el embed del plan B;
+        // 1,2 s después llegó el segundo pase de la carrera (el de la API) con una ganadora
+        // de verdad. La ganadora iba bien encaminada, pero el embed ya estaba puesto y el
+        // vigilante de 30 s seguía armado: se oía el canal bueno DEBAJO de un iframe.
+        // Si ya hay una fuente puesta y sonando, una ganadora de la MISMA tanda de sondeos
+        // no tiene nada que arreglar: se queda.
+        if (hayFuentePuestaYSonando()) {
+            log("🏁 ganadora ignorada: ya hay una fuente sonando");
             return;
         }
         long desdeElArranque = System.currentTimeMillis() - arranqueDeLaFuenteMs;
@@ -3193,9 +3257,13 @@ public class PlayerActivity extends AppCompatActivity {
         final String llave = ServidoresDelCanal.claveDeCanal(canalActual);
         final String uaFinal = uaEnJuego;
         final String refFinal = streamReferer;
+        // v7.39.2 — la generación del canal al que pertenece este apunte. Si el usuario
+        // cambia de canal dentro de los 3 s, el apunte del canal VIEJO se tiraría.
+        final int miGeneracion = generacionDelCanal.actual();
         mainHandler.removeCallbacks(apunteServidorRun);
         apunteServidorRun = () -> {
             if (isFinishing() || avisoDeStreamYaVisto) return;
+            if (!sigueVigente(miGeneracion)) return;
             if (!streamReady) return;
             ServidoresDelCanal.apuntarExito(PlayerActivity.this, llave, url, uaFinal, refFinal);
             log("💾 servidor recordado para este canal: " + url);
@@ -3415,7 +3483,12 @@ public class PlayerActivity extends AppCompatActivity {
     /** Avisa al usuario de que este enlace no da stream, en vez de mostrarle una web. */
     private void avisarSinStream() {
         // v7.38.3 — marcador .LS.: el que resuelve es el proveedor, no el WebView.
-        if (esMarcadorLs(streamDirecto) || esMarcadorLs(urlIframeInicial)) {
+        // v7.39.2 — MEDIDO en el logcat del usuario (2026-11-18 13:49:23): el canal tenía los
+        // DOS servidores buenos respondiendo 200 y aun así se abrió el embed «.LS.V2daddy_91/s»
+        // —una «url» que ni siquiera es un host— encima del vídeo que ya sonaba. La guarda de
+        // arriba miraba streamDirecto/urlIframeInicial, que valen null en este estado; los
+        // marcadores vivos están en la lista del canal (streamUrl/streamBackup).
+        if (esMarcadorLs(streamDirecto) || esMarcadorLs(urlIframeInicial) || hayMarcadorEnLaLista()) {
             log("🔒 canal con marcador .LS.: lo resuelve el redirector del proveedor "
                     + "(glbr), que ahora mismo no responde");
             runOnUiThread(() -> {
@@ -4280,6 +4353,13 @@ public class PlayerActivity extends AppCompatActivity {
             return;
         }
         mostrarCargando();
+        // v7.39.2 — EL VÍDEO MANDA: si había un embed del plan B en la ventana, se retira.
+        // Medido en el logcat del usuario (2026-11-18 13:49:23 → 13:50:23): el embed de
+        // ordernap se puso encima a las :23, a las :24 llegó la ganadora de la carrera con
+        // su /p/…/2.m3u8 respondiendo 200 una y otra vez, y el iframe SE QUEDÓ ENCIMA del
+        // vídeo durante 60 s más. El usuario veía (y oía) un canal «que no arranca» con el
+        // vídeo bueno sonando debajo. Retirar el embed es parte de «poner la directa».
+        retirarEmbedSiEstaba();
         log("Reproduciendo stream m3u8 directo (sin WebView)");
         isResolving = false;
         // v7.39.0 — fuente nueva: todavía NO hay imagen. Y se apunta la hora, que es lo que

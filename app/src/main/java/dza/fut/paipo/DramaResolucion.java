@@ -308,9 +308,35 @@ public final class DramaResolucion {
         for (Opcion o : opciones(url, backup)) {
             if (o.tipo == Tipo.MARCADOR) continue;
             if (esEmbedMuerto(o.url)) continue;
+            if (esMarcadorSinClasificar(o.url)) continue;   // v7.39.2
             out.add(o);
         }
         return out;
+    }
+
+    /**
+     * v7.39.2 — <b>una «url» que no es una url: es una orden para el redirector.</b>
+     *
+     * <p>Medido en el logcat del usuario (2026-11-18 13:49:21, beIN 1): el backup trae
+     * entradas como</p>
+     *
+     * <pre>
+     *   http://.LS.V2live_tv_custom_handler_live_tv_beinsport1_description_SD_/s
+     *   http://.LS.V2LOAD_BALANCERlive_tv_beinsport1/s
+     *   http://.LS.V2daddy_91/s
+     * </pre>
+     *
+     * <p>No tienen host (empiezan por punto), así que no pueden resolver: los cuatro
+     * murieron con {@code UnknownHostException} en 1 ms. Algunas llegaban clasificadas como
+     * {@code PAGINA}/{@code EMBEBIDA} en vez de {@code MARCADOR}, y así se colaban hasta el
+     * plan B: la app acabó abriendo {@code http://.LS.V2daddy_91/s} en el WebView ENCIMA del
+     * vídeo que ya estaba sonando. Esta guarda cierra el paso por forma, no por etiqueta.</p>
+     */
+    public static boolean esMarcadorSinClasificar(@Nullable String u) {
+        if (u == null || u.isEmpty()) return false;
+        if (u.contains(".LS.") || u.contains("/.ls")) return true;
+        // el patrón exacto: esquema://.LS.… o esquema://.algo — un host que empieza por punto
+        return u.matches("^https?://\\.[^/]*$") || u.matches("^https?://\\.[^/]*/.*$");
     }
 
     /** Todas las embebidas, incluidas las que hoy sabemos muertas (para el log). */

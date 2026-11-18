@@ -161,6 +161,11 @@ public final class CarreraDeOpciones {
         if (o == null || o.url == null) return false;
         String l = o.url.toLowerCase(Locale.ROOT);
         if (!l.startsWith("http")) return false;
+        // v7.39.2 — los marcadores NO son urls: son órdenes para el redirector del sitio
+        // («.LS.V2live_tv_custom_handler_…»). En el logcat del usuario cuatro de ellos
+        // gastaron un hilo cada uno para morir con UnknownHostException en 1 ms. Y lo peor
+        // no era el gasto: el plan B los ofrecía después como «servidor del canal».
+        if (l.contains(".ls.") || l.contains("/.ls")) return false;
         if (DramaResolucion.esPaginaDePortal(o.url)) return false;
         if (esDashCifrado(o.url, 0)) return false;
         return true;
